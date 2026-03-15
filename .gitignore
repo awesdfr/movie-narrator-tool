@@ -1,0 +1,75 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+ENV/
+
+# Node
+node_modules/
+dist/
+.npm
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 环境配置
+.env
+.env.local
+*.local
+
+# 临时文件
+temp/
+*.tmp
+*.temp
+
+# 缓存
+.cache/
+*.cache
+*.pkl
+*.faiss
+backend/.frame_cache/
+
+# 模型文件（太大不上传，保留目录结构）
+models/*.pt
+models/*.pth
+models/*.bin
+models/*.onnx
+!models/.gitkeep
+
+# 项目数据
+projects/
+
+# 视频/音频素材（太大不上传，保留目录结构）
+videos/movies/*
+videos/narrations/*
+videos/reference_audio/*
+videos/subtitles/*
+!videos/**/.gitkeep
+
+# 调试输出
+backend/debug_matches/
+
+# 日志
+logs/
+*.log
+
+# 构建输出（前端 dist 等，backend/static 保留）
+build/
+*.egg-info/
+frontend/build_output.txt
+
+# 本地工具（ffmpeg、Node.js 二进制，不上传）
+.tools/

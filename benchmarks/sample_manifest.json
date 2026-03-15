@@ -1,0 +1,49 @@
+﻿{
+  "name": "sample_movie_alignment_benchmark",
+  "description": "Replace these placeholder rows with your own labeled project segments before claiming benchmark accuracy.",
+  "project_id": "proj_replace_me",
+  "defaults": {
+    "iou_threshold": 0.8,
+    "boundary_tolerance": 1.5
+  },
+  "segments": [
+    {
+      "segment_id": "seg_0000",
+      "scenario": "crop_or_resize",
+      "label": "movie",
+      "movie_start": 12.5,
+      "movie_end": 17.8,
+      "notes": "Example labeled movie match"
+    },
+    {
+      "segment_id": "seg_0001",
+      "scenario": "subtitle_occlusion",
+      "label": "movie",
+      "movie_start": 42.0,
+      "movie_end": 48.1,
+      "notes": "Example labeled movie match with subtitles on screen"
+    },
+    {
+      "segment_id": "seg_0002",
+      "scenario": "non_movie",
+      "label": "non_movie",
+      "notes": "Example intro, bumper, or creator facecam segment"
+    },
+    {
+      "segment_id": "seg_0003",
+      "scenario": "jump_cut_dialogue",
+      "label": "movie",
+      "movie_start": 88.2,
+      "movie_end": 92.6,
+      "notes": "Example short dialogue segment"
+    },
+    {
+      "segment_id": "seg_0004",
+      "scenario": "long_segment",
+      "label": "movie",
+      "movie_start": 133.0,
+      "movie_end": 140.5,
+      "notes": "Example long narration segment"
+    }
+  ]
+}
