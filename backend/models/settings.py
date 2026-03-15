@@ -18,10 +18,12 @@ class AISettings(BaseModel):
 
     polish_template: str = Field(
         default=(
-            "你是一位专业的电影解说文案校对师。请对下面的解说文案做轻度润色。\n"
-            "要求：保持原意，不扩写剧情，不改关键名词，让表达自然、口语化、适合配音。\n"
-            "原文：\n{text}\n\n"
-            "请只输出润色后的文案。"
+            "You are a professional movie narration editor. Lightly polish the narration below.\n"
+            "Requirements: keep the original meaning, do not expand the plot, do not change key names, "
+            "make the expression natural and spoken, suitable for voice-over. "
+            "Respond in the same language as the original text.\n"
+            "Original:\n{text}\n\n"
+            "Output only the polished narration."
         ),
         description="Fallback polishing template",
     )

@@ -11,7 +11,49 @@ from .api_manager import APIManager
 class TextPolisher:
     """Polish narration text with optional AI assistance and local safeguards."""
 
-    SUPPORTED_LANGUAGES = {"zh": "Chinese", "en": "English"}
+    SUPPORTED_LANGUAGES = {
+        "zh": "Chinese",
+        "en": "English",
+        "ja": "Japanese",
+        "ko": "Korean",
+        "fr": "French",
+        "de": "German",
+        "es": "Spanish",
+        "ru": "Russian",
+        "it": "Italian",
+        "pt": "Portuguese",
+        "ar": "Arabic",
+        "th": "Thai",
+        "vi": "Vietnamese",
+    }
+
+    # Per-language AI-filler phrases to strip before polishing
+    _DE_AI_PHRASES: dict[str, list[str]] = {
+        "zh": ["让我们一起来", "可以看到", "值得一提的是", "总的来说", "不得不说", "接下来", "首先", "其次", "最后"],
+        "en": ["let's take a look", "it is worth noting that", "overall,", "in summary,",
+               "first of all,", "next,", "finally,", "it is worth mentioning that",
+               "as we can see,", "needless to say,"],
+        "ja": ["まず最初に", "次に", "最後に", "言うまでもなく", "注目すべきは", "総じて言えば"],
+        "ko": ["먼저", "다음으로", "마지막으로", "주목할 만한 것은", "전반적으로"],
+        "fr": ["tout d'abord,", "ensuite,", "enfin,", "il convient de noter que", "en résumé,", "dans l'ensemble,"],
+        "de": ["zunächst,", "dann,", "schließlich,", "es sei darauf hingewiesen,", "insgesamt,", "zusammenfassend,"],
+        "es": ["primero,", "luego,", "finalmente,", "cabe destacar que", "en resumen,", "en general,"],
+        "ru": ["во-первых,", "затем,", "наконец,", "стоит отметить,", "в целом,", "подводя итог,"],
+        "it": ["prima di tutto,", "poi,", "infine,", "vale la pena notare che", "in generale,", "in sintesi,"],
+        "pt": ["primeiramente,", "em seguida,", "por fim,", "vale notar que", "no geral,", "em resumo,"],
+    }
+
+    # Per-language self-review cleanup patterns (regex alternation)
+    _REVIEW_PATTERNS: dict[str, str] = {
+        "zh": r"(突然之间|镜头一转|不得不说|总之|总的来说)",
+        "en": r"(suddenly,?\s|the camera cuts to|it must be said|in conclusion,?\s|all in all,?\s)",
+        "ja": r"(突然|カメラが切り替わり|言うまでもなく|結論として)",
+        "ko": r"(갑자기|카메라가 전환되며|말할 것도 없이|결론적으로)",
+        "fr": r"(soudainement,?\s|la caméra coupe|il faut dire|en conclusion,?\s)",
+        "de": r"(plötzlich,?\s|die Kamera schwenkt|muss man sagen|abschließend,?\s)",
+        "es": r"(de repente,?\s|la cámara corta|hay que decir|en conclusión,?\s)",
+        "ru": r"(внезапно,?\s|камера переключается|надо сказать|в заключение,?\s)",
+    }
 
     STYLE_PRESETS = {
         "natural": "Keep the tone natural, restrained, and spoken. Avoid exaggerated transitions or summary phrases.",
@@ -54,29 +96,19 @@ class TextPolisher:
         return bool(manager.api_key)
 
     def _local_de_ai_cleanup(self, text: str) -> str:
-        replacements = {
-            "让我们一起来": "",
-            "可以看到": "",
-            "值得一提的是": "",
-            "总的来说": "",
-            "不得不说": "",
-            "接下来": "",
-            "首先": "",
-            "其次": "",
-            "最后": "",
-            "In summary,": "",
-            "overall,": "",
-            "it is worth mentioning that": "",
-        }
+        lang = self.language
+        phrases = self._DE_AI_PHRASES.get(lang, self._DE_AI_PHRASES.get("en", []))
         cleaned = text.strip()
-        for source, target in replacements.items():
-            cleaned = cleaned.replace(source, target)
+        for phrase in phrases:
+            cleaned = cleaned.replace(phrase, "")
         cleaned = re.sub(r"([，。！？!?])\1+", r"\1", cleaned)
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
         return cleaned
 
     def _self_review_cleanup(self, text: str) -> str:
-        cleaned = re.sub(r"(突然之间|镜头一转|不得不说|总之|总的来说)", "", text)
+        lang = self.language
+        pattern = self._REVIEW_PATTERNS.get(lang, self._REVIEW_PATTERNS.get("en", ""))
+        cleaned = re.sub(pattern, "", text, flags=re.IGNORECASE) if pattern else text
         cleaned = re.sub(r"([，。！？!?；;])\1+", r"\1", cleaned)
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
         return cleaned
@@ -135,9 +167,10 @@ class TextPolisher:
             result = self._self_review_cleanup(working)
             return self._fit_duration(result, target_duration)
 
+        lang_name = self.SUPPORTED_LANGUAGES.get(self.language, self.language.upper())
         duration_hint = "unknown" if target_duration is None else f"about {target_duration:.1f} seconds"
         prompt = (
-            "You are rewriting one segment of a movie narration script.\n"
+            f"You are rewriting one segment of a movie narration script in {lang_name}.\n"
             f"Style preset: {preset}. {style_hint}\n"
             f"Target spoken duration: {duration_hint}.\n"
             f"Previous segment: {prev_text or '[none]'}\n"
@@ -148,7 +181,7 @@ class TextPolisher:
             "2. Do not add plot details or moral commentary.\n"
             "3. Avoid AI-like fillers, staged transitions, and neat essay structure.\n"
             "4. Make it sound like a human narrator speaking over a matched shot.\n"
-            "5. Keep the length close to the original and suitable for the target duration.\n\n"
+            f"5. Output ONLY in {lang_name}. Keep the length close to the original and suitable for the target duration.\n\n"
             f"Original text:\n{working}\n\n"
             "Output only the rewritten segment."
         )
@@ -170,7 +203,11 @@ class TextPolisher:
     def _fit_duration(self, text: str, target_duration: Optional[float]) -> str:
         if target_duration is None or target_duration <= 0 or not text:
             return text
-        current_duration = max(len(text) / 4.0, 0.1)
+        # Estimate speech rate: ~4 chars/sec for CJK, ~2.5 words/sec for Latin/others
+        if self.language in ("zh", "ja", "ko"):
+            current_duration = max(len(text) / 4.0, 0.1)
+        else:
+            current_duration = max(len(text.split()) / 2.5, 0.1)
         ratio = target_duration / current_duration
         if ratio < 0.75:
             return text[: max(1, int(len(text) * ratio * 1.05))].rstrip("，, ")

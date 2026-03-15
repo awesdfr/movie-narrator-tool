@@ -154,8 +154,24 @@
                   <el-option label="cpu"  value="cpu" />
                 </el-select>
               </el-form-item>
-              <el-form-item label="语言">
-                <el-input v-model="settings.whisper.language" placeholder="zh" style="max-width:160px" />
+              <el-form-item label="解说语言">
+                <el-select v-model="settings.whisper.language" style="width:100%" allow-create filterable placeholder="选择解说语言">
+                  <el-option label="中文 (zh)" value="zh" />
+                  <el-option label="English (en)" value="en" />
+                  <el-option label="日本語 (ja)" value="ja" />
+                  <el-option label="한국어 (ko)" value="ko" />
+                  <el-option label="Français (fr)" value="fr" />
+                  <el-option label="Deutsch (de)" value="de" />
+                  <el-option label="Español (es)" value="es" />
+                  <el-option label="Русский (ru)" value="ru" />
+                  <el-option label="Italiano (it)" value="it" />
+                  <el-option label="Português (pt)" value="pt" />
+                  <el-option label="العربية (ar)" value="ar" />
+                  <el-option label="ภาษาไทย (th)" value="th" />
+                  <el-option label="Tiếng Việt (vi)" value="vi" />
+                  <el-option label="自动检测 (auto)" value="auto" />
+                </el-select>
+                <div class="form-tip">影响语音识别(ASR)和文案润色语言</div>
               </el-form-item>
               <el-form-item label="词级时间戳">
                 <el-switch v-model="settings.whisper.word_timestamps" />

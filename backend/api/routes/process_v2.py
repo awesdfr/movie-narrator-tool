@@ -1439,6 +1439,7 @@ async def _polish_project_task(project_id: str, style_preset: str = "movie_pro")
     polisher = TextPolisher(
         api_manager=api_manager,
         template=app_settings.ai.polish_template,
+        language=app_settings.whisper.language,
         temperature=app_settings.ai.temperature,
         max_tokens=app_settings.ai.max_tokens,
         default_style_preset=style_preset or app_settings.ai.polish_style_preset,
@@ -1519,6 +1520,7 @@ async def repolish_segment(project_id: str, segment_id: str, request: StartPolis
     polisher = TextPolisher(
         api_manager=api_manager,
         template=app_settings.ai.polish_template,
+        language=app_settings.whisper.language,
         temperature=app_settings.ai.temperature,
         max_tokens=app_settings.ai.max_tokens,
         default_style_preset=request.style_preset or app_settings.ai.polish_style_preset,
