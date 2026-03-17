@@ -1094,12 +1094,17 @@ async def start_processing(project_id: str, background_tasks: BackgroundTasks): 
     if project_id in _processing_tasks and not _processing_tasks[project_id].done():
         raise HTTPException(status_code=400, detail="Project is already processing")
 
-    if project.status in {
-        ProjectStatus.READY_FOR_POLISH,
-        ProjectStatus.READY_FOR_TTS,
-        ProjectStatus.COMPLETED,
-        ProjectStatus.ERROR,
-    }:
+    # 匹配已完成 → 直接跳到 TTS，不清空 segments
+    if project.status in {ProjectStatus.READY_FOR_POLISH, ProjectStatus.READY_FOR_TTS}:
+        task = asyncio.create_task(_batch_generate_tts_task(project_id))
+        _processing_tasks[project_id] = task
+        project.status = ProjectStatus.GENERATING_TTS
+        project.progress = ProcessingProgress(stage="generating_tts", progress=0, message="Resuming: starting TTS generation...")
+        _upsert_project(project)
+        return {"message": "Resuming TTS generation", "project_id": project_id}
+
+    # 全新开始或出错后重试 → 清空重来
+    if project.status in {ProjectStatus.COMPLETED, ProjectStatus.ERROR}:
         project.segments = []
         project.progress = ProcessingProgress()
         tts_dir = Path(__file__).resolve().parents[2] / "temp" / project_id / "tts"
@@ -1128,8 +1133,14 @@ async def stop_processing(project_id: str):
 
     project = load_project(project_id)
     if project:
-        project.status = ProjectStatus.ERROR
-        project.progress.message = "Cancelled by user"
+        # 如果匹配已完成（有段落带 movie_start），保留结果而不是丢弃
+        matched_count = sum(1 for s in project.segments if s.movie_start is not None)
+        if matched_count > 0:
+            project.status = ProjectStatus.READY_FOR_POLISH
+            project.progress.message = f"已停止。匹配结果已保留（{matched_count} 个片段已匹配），可直接继续生成语音。"
+        else:
+            project.status = ProjectStatus.ERROR
+            project.progress.message = "Cancelled by user"
         _upsert_project(project)
     return {"message": "Processing stopped"}
 
