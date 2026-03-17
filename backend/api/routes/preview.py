@@ -8,6 +8,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
+from loguru import logger
 
 from api.routes.project import load_project, save_project
 from config import settings
@@ -236,7 +237,7 @@ async def export_to_jianying(project_id: str):
     if audio_source == 'tts':
         missing = [segment.id for segment in project.segments if segment.use_segment and (not segment.tts_audio_path or not Path(segment.tts_audio_path).exists())]
         if missing:
-            raise HTTPException(status_code=400, detail=f'仍有 {len(missing)} 个启用片段未生成 TTS，请先生成后再导出')
+            logger.warning(f'导出剪映：{len(missing)} 个片段缺少 TTS，将自动使用原始解说音频替代')
 
     exporter = JianyingExporter(
         drafts_dir=app_settings.export.jianying_drafts_dir,
