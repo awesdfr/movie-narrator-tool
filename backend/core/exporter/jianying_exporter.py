@@ -437,6 +437,7 @@ class JianyingExporter:
 
         # 填充主视频轨道和音频轨道
         current_time = 0
+        prev_movie_end = 0.0  # 上一个片段的电影结束时间，用于向前延伸
         for i, segment in enumerate(project.segments):
             if not segment.use_segment:
                 continue
@@ -460,51 +461,55 @@ class JianyingExporter:
             if segment.movie_start is None or segment.movie_end is None:
                 continue
 
-            # 使用原电影匹配片段
-            # 智能延长逻辑：
-            # 1. 计算音频需要的结束时间 (desired_end)
-            # 2. 查找下一个片段的开始时间作为限制 (limit_end)，防止画面重复
-            # 3. 如果有空隙，优先延长视频
-            # 4. 如果没空隙或延长后仍不够，则使用变速
-            desired_end = segment.movie_start + duration
-
-            # 查找下一个使用同一电影源的片段的开始时间
+            # 查找相邻片段边界
             next_movie_start = None
             for next_seg in project.segments[i+1:]:
                 if next_seg.use_segment and next_seg.movie_start is not None:
                     next_movie_start = next_seg.movie_start
                     break
-
             limit_end = next_movie_start if next_movie_start is not None else (project.movie_duration or float('inf'))
-            base_end = segment.movie_end
 
-            if desired_end > base_end:
-                if limit_end > base_end:
-                    extension_end = min(desired_end, limit_end)
-                    final_movie_end = max(extension_end, base_end)
-                else:
-                    final_movie_end = base_end
+            # 智能延长逻辑（同时向后、向前扩展，减少变速需求）：
+            # 1. 优先向后延伸到 next_movie_start
+            # 2. 若向后仍不足，再向前（向更早时间）延伸
+            # 3. 实在不够才变速，但变速下限改为1倍（宁可短一点也不极端慢放）
+            clip_start = segment.movie_start
+            clip_end = segment.movie_end
+            final_movie_start = clip_start
+            final_movie_end = clip_end
+
+            if duration > (clip_end - clip_start):
+                # 先向后延伸
+                extended_end = min(clip_start + duration, limit_end)
+                final_movie_end = max(extended_end, clip_end)
+                # 若向后延伸后仍不足，再向前延伸（不超过上一片段的结束时间）
+                achieved = final_movie_end - final_movie_start
+                if achieved < duration:
+                    still_need = duration - achieved
+                    backward_room = max(0.0, clip_start - prev_movie_end)
+                    backward_extend = min(still_need, backward_room)
+                    final_movie_start = clip_start - backward_extend
             else:
-                final_movie_end = base_end
+                final_movie_end = clip_end
 
             video_seg = self._create_video_segment(
                 f"movie_{project.id}",
                 project.movie_path,
                 current_time,
-                segment.movie_start,
+                final_movie_start,
                 final_movie_end,
                 segment.mute_movie_audio,
                 target_duration=duration
             )
 
-            # 根据置信度决定放到哪个轨道
+            # 所有片段都放主轨道，确保时间线连续无空洞
+            # 低置信度片段额外复制一份到"待检查"轨道供参考，但不影响主轨道
+            main_video_track["segments"].append(video_seg)
             if segment.match_confidence < self.LOW_CONFIDENCE_THRESHOLD:
-                # 低置信度：放到"待检查"轨道
-                low_confidence_track["segments"].append(video_seg)
-                logger.debug(f"片段 {segment.id} 置信度 {segment.match_confidence:.2f} 低于阈值，放入待检查轨道")
-            else:
-                # 高置信度：放到主轨道
-                main_video_track["segments"].append(video_seg)
+                low_confidence_track["segments"].append(video_seg.copy())
+                logger.debug(f"片段 {segment.id} 置信度 {segment.match_confidence:.2f} 低于阈值，同时标记到待检查轨道")
+
+            prev_movie_end = final_movie_end
 
             # 音频片段
             if should_use_original:
@@ -586,12 +591,12 @@ class JianyingExporter:
                     f"源时长 {source_duration:.1f}s → {actual_source_duration:.1f}s"
                 )
             elif raw_speed < self.min_playback_speed:
-                # 慢放超限：源片段太短，但不能凭空创造源素材
-                # 保持原始速度，避免 source_duration 超出实际可用长度
-                speed = raw_speed
+                # 源片段太短：改为1倍速自然播放，宁可视频比音频短（剪映会冻结最后一帧）
+                # 不使用极端慢放，避免画面卡顿/重复帧
+                speed = 1.0
+                target_duration_us = source_duration_us
                 logger.debug(
-                    f"慢放速度 {raw_speed:.2f}x 低于下限 {self.min_playback_speed}x，"
-                    f"保持原速度（源片段不足以截断）"
+                    f"源片段过短 {raw_speed:.2f}x，改为1倍速自然播放（源时长 {source_duration:.1f}s < 目标 {target_duration:.1f}s）"
                 )
             else:
                 speed = raw_speed
