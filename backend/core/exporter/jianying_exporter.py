@@ -472,7 +472,7 @@ class JianyingExporter:
             # 智能延长逻辑（同时向后、向前扩展，减少变速需求）：
             # 1. 优先向后延伸到 next_movie_start
             # 2. 若向后仍不足，再向前（向更早时间）延伸
-            # 3. 实在不够才变速，但变速下限改为1倍（宁可短一点也不极端慢放）
+            # 3. 实在不够才变速（保持音画时长一致，避免空洞）
             clip_start = segment.movie_start
             clip_end = segment.movie_end
             final_movie_start = clip_start
@@ -591,12 +591,12 @@ class JianyingExporter:
                     f"源时长 {source_duration:.1f}s → {actual_source_duration:.1f}s"
                 )
             elif raw_speed < self.min_playback_speed:
-                # 源片段太短：改为1倍速自然播放，宁可视频比音频短（剪映会冻结最后一帧）
-                # 不使用极端慢放，避免画面卡顿/重复帧
-                speed = 1.0
-                target_duration_us = source_duration_us
+                # 源片段不足：保持原始速度确保 target_duration 与音频一致（不产生空洞）
+                # 慢放是视觉效果问题，但音画时长一致是同步的前提
+                speed = raw_speed
                 logger.debug(
-                    f"源片段过短 {raw_speed:.2f}x，改为1倍速自然播放（源时长 {source_duration:.1f}s < 目标 {target_duration:.1f}s）"
+                    f"源片段不足 {raw_speed:.2f}x（低于下限 {self.min_playback_speed}x），"
+                    f"保持原速确保音画同步（源时长 {source_duration:.1f}s / 目标 {target_duration:.1f}s）"
                 )
             else:
                 speed = raw_speed
