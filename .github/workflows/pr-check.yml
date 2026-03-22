@@ -1,0 +1,205 @@
+name: PR Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+
+env:
+  PYTHON_VERSION: '3.10'
+  NODE_VERSION: '20'
+
+jobs:
+  # ==================== PR 信息检查 ====================
+  pr-title-check:
+    name: PR Title Check
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check PR title
+      uses: amannn/action-semantic-pull-request@v5
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        types: |
+          feat
+          fix
+          docs
+          style
+          refactor
+          perf
+          test
+          build
+          ci
+          chore
+          revert
+        requireScope: false
+
+  # ==================== 代码变更分析 ====================
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.changes.outputs.backend }}
+      frontend: ${{ steps.changes.outputs.frontend }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Detect file changes
+      id: changes
+      uses: dorny/paths-filter@v2
+      with:
+        filters: |
+          backend:
+            - 'backend/**'
+            - '!backend/static/**'
+          frontend:
+            - 'frontend/**'
+
+  # ==================== 后端快速检查 ====================
+  backend-quick-check:
+    name: Backend Quick Check
+    runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.outputs.backend == 'true' }}
+    defaults:
+      run:
+        working-directory: ./backend
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install linting tools
+      run: |
+        pip install flake8 black isort
+
+    - name: Run flake8
+      run: |
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --exclude=venv,__pycache__,.git,static
+
+    - name: Check code formatting
+      run: |
+        black --check --diff . --exclude='venv|__pycache__|.git|static' || true
+
+    - name: Syntax check
+      run: |
+        python -m py_compile main.py
+        echo "✓ Python syntax check passed"
+
+  # ==================== 前端快速检查 ====================
+  frontend-quick-check:
+    name: Frontend Quick Check
+    runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.outputs.frontend == 'true' }}
+    defaults:
+      run:
+        working-directory: ./frontend
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        cache-dependency-path: frontend/package-lock.json
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Run ESLint
+      run: npm run lint || true
+
+    - name: Build check
+      run: npm run build
+
+  # ==================== 依赖安全检查 ====================
+  dependency-check:
+    name: Dependency Security Check
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run npm audit (frontend)
+      working-directory: ./frontend
+      run: |
+        npm audit --audit-level=high || true
+
+    - name: Run pip-audit (backend)
+      run: |
+        pip install pip-audit
+        pip-audit --requirement=backend/requirements.txt || true
+
+  # ==================== PR 大小检查 ====================
+  pr-size-check:
+    name: PR Size Check
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Check PR size
+      run: |
+        # 获取变更的代码行数
+        LINES_CHANGED=$(git diff --stat origin/${{ github.base_ref }} | tail -1 | awk '{print $4+$6}')
+        echo "Lines changed: $LINES_CHANGED"
+        
+        if [ "$LINES_CHANGED" -gt 1000 ]; then
+          echo "⚠️ Warning: This PR changes more than 1000 lines. Consider breaking it into smaller PRs."
+        elif [ "$LINES_CHANGED" -gt 500 ]; then
+          echo "ℹ️ This PR changes $LINES_CHANGED lines."
+        else
+          echo "✅ PR size looks good ($LINES_CHANGED lines)."
+        fi
+
+  # ==================== 代码覆盖率报告 ====================
+  coverage-report:
+    name: Coverage Report
+    runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.outputs.backend == 'true' }}
+    defaults:
+      run:
+        working-directory: ./backend
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install dependencies
+      run: |
+        pip install pytest pytest-cov
+        pip install -r requirements.txt
+
+    - name: Run tests with coverage
+      run: |
+        pytest --cov=. --cov-report=xml --cov-report=term || true
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        files: ./backend/coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+        fail_ci_if_error: false

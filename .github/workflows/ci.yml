@@ -1,0 +1,368 @@
+name: CI - Build and Test
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  pull_request:
+    branches: [ main, develop ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+
+env:
+  PYTHON_VERSION: '3.10'
+  NODE_VERSION: '20'
+
+jobs:
+  # ==================== 后端代码检查和测试 ====================
+  backend-lint:
+    name: Backend Lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./backend
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+        cache-dependency-path: backend/requirements.txt
+
+    - name: Install linting tools
+      run: |
+        pip install flake8 black isort mypy
+
+    - name: Run flake8
+      run: |
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --exclude=venv,__pycache__,.git
+
+    - name: Check code formatting with black
+      run: |
+        black --check --diff . --exclude='venv|__pycache__|.git' || true
+
+    - name: Check import sorting with isort
+      run: |
+        isort --check-only --diff . --skip venv --skip __pycache__ || true
+
+  # ==================== 前端代码检查 ====================
+  frontend-lint:
+    name: Frontend Lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./frontend
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        cache-dependency-path: frontend/package-lock.json
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Run ESLint
+      run: npm run lint || true
+
+    - name: Type check (if TypeScript)
+      run: |
+        if [ -f "tsconfig.json" ]; then
+          npx vue-tsc --noEmit || true
+        fi
+      shell: bash
+
+  # ==================== 后端构建测试 ====================
+  backend-build:
+    name: Backend Build Test
+    runs-on: ubuntu-latest
+    needs: backend-lint
+    defaults:
+      run:
+        working-directory: ./backend
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+        cache-dependency-path: backend/requirements.txt
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg libsm6 libxext6 libgl1
+
+    - name: Install Python dependencies
+      run: |
+        pip install --upgrade pip
+        pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+        pip install scipy librosa webrtcvad-wheels typing
+        pip install resemblyzer==0.1.4 --no-deps
+        pip install -r requirements.txt
+
+    - name: Verify imports
+      run: |
+        python -c "
+        import sys
+        sys.path.insert(0, '.')
+        from main import app
+        print('✓ FastAPI app imports successfully')
+        from config import settings
+        print('✓ Config imports successfully')
+        print('✓ All critical imports successful')
+        "
+
+    - name: Test health endpoint
+      run: |
+        python -c "
+        import sys
+        sys.path.insert(0, '.')
+        from fastapi.testclient import TestClient
+        from main import app
+        client = TestClient(app)
+        response = client.get('/health')
+        assert response.status_code == 200
+        assert response.json()['status'] == 'healthy'
+        print('✓ Health check passed')
+        "
+
+  # ==================== 前端构建测试 ====================
+  frontend-build:
+    name: Frontend Build Test
+    runs-on: ubuntu-latest
+    needs: frontend-lint
+    defaults:
+      run:
+        working-directory: ./frontend
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        cache-dependency-path: frontend/package-lock.json
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Build frontend
+      run: npm run build
+
+    - name: Verify build output
+      run: |
+        if [ ! -d "../backend/static" ]; then
+          echo "Error: Build output directory not found"
+          exit 1
+        fi
+        if [ ! -f "../backend/static/index.html" ]; then
+          echo "Error: index.html not found in build output"
+          exit 1
+        fi
+        echo "✓ Frontend build successful"
+        ls -la ../backend/static/
+      shell: bash
+
+  # ==================== 可选：React 前端构建 ====================
+  frontend-react-build:
+    name: Frontend React Build Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./frontend-react
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        cache-dependency-path: frontend-react/package-lock.json
+
+    - name: Install dependencies
+      run: |
+        if [ -f "package.json" ]; then
+          npm ci
+        else
+          echo "No package.json found, skipping"
+          exit 0
+        fi
+      shell: bash
+
+    - name: Build React frontend
+      run: |
+        if [ -f "package.json" ]; then
+          npm run build || echo "Build may have warnings"
+        fi
+      shell: bash
+
+  # ==================== 集成测试 ====================
+  integration-test:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: [backend-build, frontend-build]
+    defaults:
+      run:
+        working-directory: ./backend
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+        cache-dependency-path: backend/requirements.txt
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg libsm6 libxext6 libgl1
+
+    - name: Install Python dependencies
+      run: |
+        pip install --upgrade pip
+        pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+        pip install scipy librosa webrtcvad-wheels typing
+        pip install resemblyzer==0.1.4 --no-deps
+        pip install -r requirements.txt
+        pip install pytest pytest-asyncio httpx
+
+    - name: Run API tests
+      run: |
+        python -c "
+        import sys
+        sys.path.insert(0, '.')
+        from fastapi.testclient import TestClient
+        from main import app
+        
+        client = TestClient(app)
+        
+        # Test health endpoint
+        response = client.get('/health')
+        assert response.status_code == 200
+        print('✓ /health endpoint works')
+        
+        # Test API info endpoint
+        response = client.get('/api')
+        assert response.status_code == 200
+        data = response.json()
+        assert 'name' in data
+        assert 'version' in data
+        print('✓ /api endpoint works')
+        
+        # Test docs endpoint
+        response = client.get('/docs')
+        assert response.status_code == 200
+        print('✓ /docs endpoint works')
+        
+        print('All integration tests passed!')
+        "
+
+  # ==================== 安全扫描 ====================
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+        severity: 'CRITICAL,HIGH'
+
+    - name: Upload Trivy scan results
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  # ==================== 构建产物上传 ====================
+  build-artifacts:
+    name: Build Artifacts
+    runs-on: ubuntu-latest
+    needs: [integration-test]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        cache-dependency-path: frontend/package-lock.json
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg libsm6 libxext6 libgl1
+
+    - name: Install Python dependencies
+      working-directory: ./backend
+      run: |
+        pip install --upgrade pip
+        pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+        pip install scipy librosa webrtcvad-wheels typing
+        pip install resemblyzer==0.1.4 --no-deps
+        pip install -r requirements.txt
+
+    - name: Build frontend
+      working-directory: ./frontend
+      run: |
+        npm ci
+        npm run build
+
+    - name: Create distribution package
+      run: |
+        mkdir -p dist/movie-narrator-tool
+        cp -r backend/* dist/movie-narrator-tool/
+        cp -r frontend dist/movie-narrator-tool/frontend-source
+        cp README.md LICENSE dist/movie-narrator-tool/
+        cd dist
+        zip -r movie-narrator-tool.zip movie-narrator-tool/
+
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: movie-narrator-tool-build
+        path: dist/movie-narrator-tool.zip
+        retention-days: 7

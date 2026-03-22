@@ -1,0 +1,100 @@
+# 电影解说视频制作工具 Dockerfile (GPU 版本)
+# 基于 NVIDIA CUDA 镜像，支持 GPU 加速
+
+FROM nvidia/cuda:12.1-runtime-ubuntu22.04 AS production
+
+# 设置环境变量
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    CUDA_HOME=/usr/local/cuda \
+    PATH=${CUDA_HOME}/bin:${PATH} \
+    LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
+
+# 安装系统依赖
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 \
+    python3-pip \
+    ffmpeg \
+    libsm6 \
+    libxext6 \
+    libgl1 \
+    libgomp1 \
+    curl \
+    ca-certificates \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# 设置 Python3 为默认
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1 && \
+    update-alternatives --install /usr/bin/pip pip /usr/bin/pip3 1
+
+# 设置工作目录
+WORKDIR /app
+
+# 创建必要的目录
+RUN mkdir -p /app/videos/movies \
+    /app/videos/narrations \
+    /app/videos/reference_audio \
+    /app/videos/subtitles \
+    /app/models \
+    /app/temp \
+    /app/temp/logs \
+    /app/projects
+
+# 复制后端依赖
+COPY backend/requirements.txt ./
+
+# 安装 Python 依赖 (GPU 版本)
+RUN pip install --no-cache-dir torch==2.5.1 torchvision --index-url https://download.pytorch.org/whl/cu121 && \
+    pip install --no-cache-dir scipy librosa webrtcvad-wheels typing && \
+    pip install --no-cache-dir resemblyzer==0.1.4 --no-deps && \
+    pip install --no-cache-dir -r requirements.txt
+
+# 复制后端代码
+COPY backend/ ./
+
+# 复制前端构建的静态文件（需要预先构建）
+COPY backend/static ./static
+
+# 复制启动脚本
+COPY <<'EOF' /app/start.sh
+#!/bin/bash
+set -e
+
+echo "========================================"
+echo "  电影解说视频制作工具 (GPU 版本)"
+echo "  Movie Narrator Tool (GPU)"
+echo "========================================"
+
+# 检查 CUDA 可用性
+if command -v nvidia-smi &> /dev/null; then
+    echo "CUDA 信息:"
+    nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv
+    echo ""
+else
+    echo "警告: nvidia-smi 不可用，GPU 加速可能无法正常工作"
+fi
+
+# 确保目录存在
+mkdir -p /app/videos/movies /app/videos/narrations /app/videos/reference_audio /app/videos/subtitles
+mkdir -p /app/models /app/temp /app/projects
+
+# 启动应用
+echo "启动服务..."
+exec python main.py
+EOF
+
+RUN chmod +x /app/start.sh
+
+# 暴露端口
+EXPOSE 8000
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# 启动命令
+CMD ["/app/start.sh"]

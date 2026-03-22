@@ -1,0 +1,368 @@
+name: CD - Deploy
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: '部署环境'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+env:
+  PYTHON_VERSION: '3.10'
+  NODE_VERSION: '20'
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ==================== 版本和变更日志 ====================
+  prepare-release:
+    name: Prepare Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+      release_notes: ${{ steps.release_notes.outputs.notes }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Get version
+      id: get_version
+      run: |
+        if [[ $GITHUB_REF == refs/tags/* ]]; then
+          VERSION=${GITHUB_REF#refs/tags/}
+        else
+          VERSION="dev-$(date +%Y%m%d)-${GITHUB_SHA::7}"
+        fi
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Version: $VERSION"
+
+    - name: Generate release notes
+      id: release_notes
+      run: |
+        NOTES=$(git log --pretty=format:"- %s" $(git describe --tags --abbrev=0 2>/dev/null || echo HEAD~10)..HEAD || echo "- Initial release")
+        echo "notes<<EOF" >> $GITHUB_OUTPUT
+        echo "$NOTES" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+  # ==================== 构建 Docker 镜像 ====================
+  build-docker:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: prepare-release
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=tag
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        platforms: linux/amd64,linux/arm64
+
+  # ==================== 创建 GitHub Release ====================
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [prepare-release, build-docker]
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: movie-narrator-tool-build
+        path: ./artifacts
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        name: Release ${{ needs.prepare-release.outputs.version }}
+        body: |
+          ## 变更日志
+          ${{ needs.prepare-release.outputs.release_notes }}
+
+          ## Docker 镜像
+          ```bash
+          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.prepare-release.outputs.version }}
+          ```
+
+          ## 快速开始
+          ```bash
+          # 使用 Docker 运行
+          docker run -d -p 8000:8000 \
+            -v $(pwd)/videos:/app/videos \
+            -v $(pwd)/models:/app/models \
+            -v $(pwd)/temp:/app/temp \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.prepare-release.outputs.version }}
+          ```
+        files: |
+          ./artifacts/movie-narrator-tool.zip
+        draft: false
+        prerelease: ${{ contains(needs.prepare-release.outputs.version, 'alpha') || contains(needs.prepare-release.outputs.version, 'beta') || contains(needs.prepare-release.outputs.version, 'rc') }}
+
+  # ==================== 部署到 Staging ====================
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [build-docker]
+    if: github.event.inputs.environment == 'staging' || github.ref == 'refs/heads/develop'
+    environment:
+      name: staging
+      url: ${{ steps.deploy.outputs.url }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Deploy to Staging Server
+      id: deploy
+      env:
+        STAGING_HOST: ${{ secrets.STAGING_HOST }}
+        STAGING_USER: ${{ secrets.STAGING_USER }}
+        STAGING_KEY: ${{ secrets.STAGING_SSH_KEY }}
+        STAGING_PORT: ${{ secrets.STAGING_PORT || '22' }}
+      run: |
+        echo "::add-mask::$STAGING_HOST"
+        
+        # 配置 SSH
+        mkdir -p ~/.ssh
+        echo "$STAGING_KEY" > ~/.ssh/staging_key
+        chmod 600 ~/.ssh/staging_key
+        
+        # 添加主机到 known_hosts（首次部署时需要）
+        ssh-keyscan -p $STAGING_PORT -H $STAGING_HOST >> ~/.ssh/known_hosts 2>/dev/null || true
+        
+        # 部署命令
+        ssh -i ~/.ssh/staging_key -p $STAGING_PORT $STAGING_USER@$STAGING_HOST << 'EOF'
+          cd /opt/movie-narrator-tool || mkdir -p /opt/movie-narrator-tool && cd /opt/movie-narrator-tool
+          
+          # 拉取最新镜像
+          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          
+          # 停止并移除旧容器
+          docker-compose -f docker-compose.staging.yml down || true
+          
+          # 更新 docker-compose 文件
+          cat > docker-compose.staging.yml << 'COMPOSE'
+          version: '3.8'
+          services:
+            app:
+              image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+              container_name: movie-narrator-staging
+              ports:
+                - "8000:8000"
+              volumes:
+                - ./videos:/app/videos
+                - ./models:/app/models
+                - ./temp:/app/temp
+                - ./projects:/app/projects
+              environment:
+                - DEBUG=true
+                - HOST=0.0.0.0
+                - PORT=8000
+              restart: unless-stopped
+              healthcheck:
+                test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+                interval: 30s
+                timeout: 10s
+                retries: 3
+          COMPOSE
+          
+          # 启动新容器
+          docker-compose -f docker-compose.staging.yml up -d
+          
+          # 等待服务启动并检查健康状态
+          sleep 10
+          curl -f http://localhost:8000/health || exit 1
+          
+          echo "Staging deployment successful!"
+        EOF
+        
+        echo "url=http://$STAGING_HOST:8000" >> $GITHUB_OUTPUT
+
+    - name: Notify deployment status
+      if: always()
+      run: |
+        if [ "${{ job.status }}" == "success" ]; then
+          echo "✅ Staging deployment successful!"
+        else
+          echo "❌ Staging deployment failed!"
+        fi
+
+  # ==================== 部署到 Production ====================
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [build-docker, deploy-staging]
+    if: github.event.inputs.environment == 'production' || (startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, 'alpha') && !contains(github.ref, 'beta') && !contains(github.ref, 'rc'))
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.url }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Deploy to Production Server
+      id: deploy
+      env:
+        PROD_HOST: ${{ secrets.PROD_HOST }}
+        PROD_USER: ${{ secrets.PROD_USER }}
+        PROD_KEY: ${{ secrets.PROD_SSH_KEY }}
+        PROD_PORT: ${{ secrets.PROD_PORT || '22' }}
+      run: |
+        echo "::add-mask::$PROD_HOST"
+        
+        # 配置 SSH
+        mkdir -p ~/.ssh
+        echo "$PROD_KEY" > ~/.ssh/prod_key
+        chmod 600 ~/.ssh/prod_key
+        
+        # 添加主机到 known_hosts
+        ssh-keyscan -p $PROD_PORT -H $PROD_HOST >> ~/.ssh/known_hosts 2>/dev/null || true
+        
+        # 部署命令
+        ssh -i ~/.ssh/prod_key -p $PROD_PORT $PROD_USER@$PROD_HOST << 'EOF'
+          cd /opt/movie-narrator-tool || mkdir -p /opt/movie-narrator-tool && cd /opt/movie-narrator-tool
+          
+          # 备份当前版本
+          docker tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:backup-$(date +%Y%m%d) || true
+          
+          # 拉取最新镜像
+          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          
+          # 蓝绿部署
+          # 检查当前运行的容器
+          CURRENT_CONTAINER=$(docker ps --filter "name=movie-narrator" --format "{{.Names}}" | grep -E "(blue|green)" | head -1)
+          
+          if [ "$CURRENT_CONTAINER" == "movie-narrator-blue" ]; then
+            NEW_CONTAINER="movie-narrator-green"
+            NEW_PORT="8001"
+          else
+            NEW_CONTAINER="movie-narrator-blue"
+            NEW_PORT="8000"
+          fi
+          
+          echo "Deploying to $NEW_CONTAINER on port $NEW_PORT"
+          
+          # 停止并移除目标容器（如果存在）
+          docker stop $NEW_CONTAINER 2>/dev/null || true
+          docker rm $NEW_CONTAINER 2>/dev/null || true
+          
+          # 启动新容器
+          docker run -d \
+            --name $NEW_CONTAINER \
+            -p $NEW_PORT:8000 \
+            -v /opt/movie-narrator-tool/videos:/app/videos \
+            -v /opt/movie-narrator-tool/models:/app/models \
+            -v /opt/movie-narrator-tool/temp:/app/temp \
+            -v /opt/movie-narrator-tool/projects:/app/projects \
+            -e DEBUG=false \
+            -e HOST=0.0.0.0 \
+            -e PORT=8000 \
+            --restart unless-stopped \
+            --health-cmd="curl -f http://localhost:8000/health || exit 1" \
+            --health-interval=30s \
+            --health-timeout=10s \
+            --health-retries=3 \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          
+          # 等待服务启动
+          sleep 15
+          
+          # 健康检查
+          if ! curl -f http://localhost:$NEW_PORT/health; then
+            echo "Health check failed! Rolling back..."
+            docker stop $NEW_CONTAINER
+            docker rm $NEW_CONTAINER
+            exit 1
+          fi
+          
+          # 切换流量（更新 Nginx 配置或负载均衡器）
+          # 这里假设使用 Nginx
+          sudo sed -i "s/proxy_pass http:\/\/localhost:[0-9]*/proxy_pass http:\/\/localhost:$NEW_PORT/" /etc/nginx/conf.d/movie-narrator.conf
+          sudo nginx -s reload
+          
+          # 停止旧容器
+          if [ -n "$CURRENT_CONTAINER" ]; then
+            docker stop $CURRENT_CONTAINER 2>/dev/null || true
+            docker rm $CURRENT_CONTAINER 2>/dev/null || true
+          fi
+          
+          echo "Production deployment successful!"
+        EOF
+        
+        echo "url=http://$PROD_HOST" >> $GITHUB_OUTPUT
+
+    - name: Notify deployment status
+      if: always()
+      run: |
+        if [ "${{ job.status }}" == "success" ]; then
+          echo "✅ Production deployment successful!"
+        else
+          echo "❌ Production deployment failed!"
+        fi
+
+  # ==================== 清理旧镜像 ====================
+  cleanup:
+    name: Cleanup Old Images
+    runs-on: ubuntu-latest
+    needs: [deploy-production]
+    if: always()
+
+    steps:
+    - name: Delete old package versions
+      uses: actions/delete-package-versions@v4
+      with:
+        package-name: ${{ github.event.repository.name }}
+        package-type: 'container'
+        min-versions-to-keep: 5
+        delete-only-untagged-versions: true
