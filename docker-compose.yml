@@ -1,0 +1,96 @@
+version: '3.8'
+
+services:
+  movie-narrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    image: movie-narrator-tool:latest
+    container_name: movie-narrator-tool
+    ports:
+      - "8000:8000"
+    volumes:
+      # 视频素材目录
+      - ./videos:/app/videos
+      # 模型文件目录
+      - ./models:/app/models
+      # 临时文件目录
+      - ./temp:/app/temp
+      # 项目数据目录
+      - ./projects:/app/projects
+      # 日志目录
+      - ./logs:/app/temp/logs
+    environment:
+      # 应用配置
+      - DEBUG=false
+      - HOST=0.0.0.0
+      - PORT=8000
+      # 目录配置
+      - VIDEOS_DIR=/app/videos
+      - MODELS_DIR=/app/models
+      - TEMP_DIR=/app/temp
+      - PROJECTS_DIR=/app/projects
+      # AI 配置（从环境变量或 .env 文件读取）
+      - AI_API_BASE=${AI_API_BASE:-https://api.openai.com/v1}
+      - AI_API_KEY=${AI_API_KEY:-}
+      - AI_MODEL=${AI_MODEL:-gpt-4o}
+      # TTS 配置
+      - TTS_API_BASE=${TTS_API_BASE:-http://127.0.0.1:5000}
+      # Whisper 配置
+      - WHISPER_MODEL=${WHISPER_MODEL:-medium}
+      - WHISPER_DEVICE=cpu
+      - WHISPER_LANGUAGE=zh
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
+          cpus: '2'
+          memory: 4G
+
+  # 可选：使用 GPU 的版本（需要 nvidia-docker）
+  movie-narrator-gpu:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+      target: production
+    image: movie-narrator-tool:gpu
+    container_name: movie-narrator-tool-gpu
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./videos:/app/videos
+      - ./models:/app/models
+      - ./temp:/app/temp
+      - ./projects:/app/projects
+    environment:
+      - DEBUG=false
+      - HOST=0.0.0.0
+      - PORT=8000
+      - WHISPER_DEVICE=cuda
+      - WHISPER_MODEL=large-v3
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    profiles:
+      - gpu
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s

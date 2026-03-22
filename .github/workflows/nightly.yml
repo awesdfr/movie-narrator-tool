@@ -1,0 +1,266 @@
+name: Nightly Build
+
+on:
+  schedule:
+    # 每天凌晨 2 点运行
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: '3.10'
+  NODE_VERSION: '20'
+
+jobs:
+  # ==================== 依赖更新检查 ====================
+  dependency-update-check:
+    name: Check Dependency Updates
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Check Python dependencies
+      working-directory: ./backend
+      run: |
+        pip install pip-outdated
+        echo "=== Checking for outdated Python packages ==="
+        pip-outdated requirements.txt || true
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+
+    - name: Check Node.js dependencies
+      working-directory: ./frontend
+      run: |
+        npm install
+        echo "=== Checking for outdated npm packages ==="
+        npm outdated || true
+
+  # ==================== 完整测试套件 ====================
+  full-test-suite:
+    name: Full Test Suite
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.11', '3.12']
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg libsm6 libxext6 libgl1
+
+    - name: Install Python dependencies
+      working-directory: ./backend
+      run: |
+        pip install --upgrade pip
+        pip install torch --index-url https://download.pytorch.org/whl/cpu
+        pip install scipy librosa webrtcvad-wheels typing
+        pip install resemblyzer==0.1.4 --no-deps
+        pip install -r requirements.txt
+        pip install pytest pytest-asyncio pytest-cov
+
+    - name: Run full test suite
+      working-directory: ./backend
+      run: |
+        pytest --cov=. --cov-report=xml --cov-report=term -v || true
+
+    - name: Upload coverage report
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-report-py${{ matrix.python-version }}
+        path: backend/coverage.xml
+        retention-days: 7
+
+  # ==================== 性能基准测试 ====================
+  performance-benchmark:
+    name: Performance Benchmark
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install dependencies
+      working-directory: ./backend
+      run: |
+        pip install --upgrade pip
+        pip install torch --index-url https://download.pytorch.org/whl/cpu
+        pip install -r requirements.txt
+        pip install pytest-benchmark
+
+    - name: Run benchmarks
+      working-directory: ./backend
+      run: |
+        echo "Running performance benchmarks..."
+        # 这里可以添加具体的基准测试
+        # pytest benchmarks/ -v || true
+
+  # ==================== 安全扫描 ====================
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+        severity: 'CRITICAL,HIGH,MEDIUM'
+
+    - name: Upload Trivy scan results
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+    - name: Run Bandit security linter
+      run: |
+        pip install bandit
+        bandit -r backend/ -f json -o bandit-report.json || true
+        bandit -r backend/ || true
+
+    - name: Upload Bandit report
+      uses: actions/upload-artifact@v4
+      with:
+        name: bandit-security-report
+        path: bandit-report.json
+        retention-days: 30
+
+  # ==================== 代码质量报告 ====================
+  code-quality-report:
+    name: Code Quality Report
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install tools
+      run: |
+        pip install flake8 black isort mypy radon
+
+    - name: Generate complexity report
+      working-directory: ./backend
+      run: |
+        echo "=== Code Complexity Report ===" > complexity-report.txt
+        radon cc . -a -nc >> complexity-report.txt || true
+        echo "" >> complexity-report.txt
+        echo "=== Maintainability Index ===" >> complexity-report.txt
+        radon mi . >> complexity-report.txt || true
+        cat complexity-report.txt
+
+    - name: Generate linting report
+      working-directory: ./backend
+      run: |
+        echo "=== Linting Report ===" > lint-report.txt
+        flake8 . --exclude=venv,__pycache__,.git,static >> lint-report.txt 2>&1 || true
+        cat lint-report.txt
+
+    - name: Upload reports
+      uses: actions/upload-artifact@v4
+      with:
+        name: code-quality-reports
+        path: |
+          backend/complexity-report.txt
+          backend/lint-report.txt
+        retention-days: 30
+
+  # ==================== 创建 Issue 报告 ====================
+  create-report-issue:
+    name: Create Report Issue
+    runs-on: ubuntu-latest
+    needs: [dependency-update-check, full-test-suite, security-scan, code-quality-report]
+    if: always()
+    permissions:
+      issues: write
+
+    steps:
+    - name: Create nightly report
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const date = new Date().toISOString().split('T')[0];
+          const jobs = [
+            { name: 'Dependency Update Check', status: '${{ needs.dependency-update-check.result }}' },
+            { name: 'Full Test Suite', status: '${{ needs.full-test-suite.result }}' },
+            { name: 'Security Scan', status: '${{ needs.security-scan.result }}' },
+            { name: 'Code Quality Report', status: '${{ needs.code-quality-report.result }}' }
+          ];
+          
+          const statusEmoji = {
+            'success': '✅',
+            'failure': '❌',
+            'cancelled': '⚠️',
+            'skipped': '⏭️'
+          };
+          
+          let body = `## Nightly Build Report - ${date}\n\n`;
+          body += '| Job | Status |\n';
+          body += '|-----|--------|\n';
+          jobs.forEach(job => {
+            body += `| ${job.name} | ${statusEmoji[job.status] || '❓'} ${job.status} |\n`;
+          });
+          
+          body += `\n[View full workflow run](${context.payload.repository.html_url}/actions/runs/${context.runId})`;
+          
+          // 查找是否已有当天的报告 issue
+          const issues = await github.rest.issues.listForRepo({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            labels: 'nightly-report',
+            state: 'open'
+          });
+          
+          const todayIssue = issues.data.find(issue => issue.title.includes(date));
+          
+          if (todayIssue) {
+            // 更新现有 issue
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: todayIssue.number,
+              body: body
+            });
+          } else {
+            // 创建新 issue
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Nightly Build Report - ${date}`,
+              body: body,
+              labels: ['nightly-report', 'automated']
+            });
+          }

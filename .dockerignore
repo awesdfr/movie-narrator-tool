@@ -1,0 +1,84 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.yarn
+.pnp.*
+
+# 构建输出
+frontend/dist/
+frontend/.vite/
+dist/
+build/
+
+# 临时文件和日志
+temp/
+*.log
+logs/
+*.tmp
+
+# 视频和模型（大文件）
+videos/
+models/
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.wav
+*.mp3
+*.pth
+*.pt
+*.onnx
+*.pb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 测试
+tests/
+test/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 文档
+docs/
+*.md
+!README.md
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+
+# 其他
+*.bat
+*.ps1
+.github/
