@@ -15,7 +15,6 @@ from config import settings
 router = APIRouter()
 
 VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v'}
-AUDIO_EXTENSIONS = {'.mp3', '.wav', '.flac', '.aac', '.ogg', '.m4a', '.wma'}
 SUBTITLE_EXTENSIONS = {'.srt'}
 
 
@@ -70,22 +69,16 @@ async def list_narrations():
     return list_files(settings.videos_dir / 'narrations', VIDEO_EXTENSIONS)
 
 
-@router.get('/reference_audio', response_model=list[FileInfo])
-async def list_reference_audio():
-    return list_files(settings.videos_dir / 'reference_audio', AUDIO_EXTENSIONS)
-
-
 @router.get('/subtitles', response_model=list[FileInfo])
 async def list_subtitles():
     return list_files(settings.videos_dir / 'subtitles', SUBTITLE_EXTENSIONS)
 
 
 @router.post('/open_folder')
-async def open_folder(folder_type: Literal['movies', 'narrations', 'reference_audio', 'subtitles']):
+async def open_folder(folder_type: Literal['movies', 'narrations', 'subtitles']):
     folder_map = {
         'movies': settings.videos_dir / 'movies',
         'narrations': settings.videos_dir / 'narrations',
-        'reference_audio': settings.videos_dir / 'reference_audio',
         'subtitles': settings.videos_dir / 'subtitles',
     }
     folder_path = folder_map[folder_type]
@@ -97,57 +90,3 @@ async def open_folder(folder_type: Literal['movies', 'narrations', 'reference_au
     except Exception as exc:
         logger.error(f"Failed to open folder {folder_path}: {exc}")
         raise HTTPException(status_code=500, detail=f'打开文件夹失败: {exc}')
-
-
-@router.post('/validate_video')
-async def validate_video(path: str):
-    file_path = Path(path)
-    if not file_path.exists():
-        raise HTTPException(status_code=400, detail=f'文件不存在: {path}')
-    if file_path.suffix.lower() not in VIDEO_EXTENSIONS:
-        raise HTTPException(status_code=400, detail=f'不支持的视频格式: {file_path.suffix}')
-
-    try:
-        from core.video_processor.analysis_video import ensure_analysis_video_sync
-        import cv2
-
-        capture = cv2.VideoCapture(ensure_analysis_video_sync(str(file_path)))
-        if not capture.isOpened():
-            raise HTTPException(status_code=400, detail='无法打开视频文件，文件可能已损坏')
-
-        fps = capture.get(cv2.CAP_PROP_FPS)
-        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        duration = frame_count / fps if fps > 0 else 0
-        capture.release()
-
-        return {
-            'valid': True,
-            'info': {
-                'fps': fps,
-                'frame_count': frame_count,
-                'width': width,
-                'height': height,
-                'duration': duration,
-                'duration_display': f"{int(duration // 3600):02d}:{int((duration % 3600) // 60):02d}:{int(duration % 60):02d}",
-            },
-        }
-    except ImportError:
-        return {'valid': True, 'info': None}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.error(f"Video validation failed for {file_path}: {exc}")
-        raise HTTPException(status_code=400, detail=f'视频验证失败: {exc}')
-
-
-@router.get('/videos_dir')
-async def get_videos_dir():
-    return {
-        'videos_dir': str(settings.videos_dir),
-        'movies_dir': str(settings.videos_dir / 'movies'),
-        'narrations_dir': str(settings.videos_dir / 'narrations'),
-        'reference_audio_dir': str(settings.videos_dir / 'reference_audio'),
-        'subtitles_dir': str(settings.videos_dir / 'subtitles'),
-    }

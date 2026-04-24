@@ -24,16 +24,11 @@ from models.segment import (
     SegmentBatchUpdate,
     SegmentType,
     SegmentUpdate,
-    TTSStatus,
 )
 
 router = APIRouter()
 _processing_tasks: dict[str, asyncio.Task] = {}
 _VISUAL_SPLIT_ID_RE = re.compile(r"^(?P<base>.+)_(?:v|c)(?P<part>\d{2,})$")
-
-
-class StartPolishRequest(BaseModel):
-    style_preset: str = Field(default="movie_pro")
 
 
 class ResegmentRequest(BaseModel):
@@ -5329,13 +5324,13 @@ async def process_project_task(project_id: str):
         await _match_segments(project_id, project, segments, app_settings)
 
         stats = _compute_stats(segments)
-        project.status = ProjectStatus.READY_FOR_POLISH
+        project.status = ProjectStatus.COMPLETED
         _upsert_project(project)
         await update_progress(
             project_id,
-            "ready_for_polish",
+            "completed",
             100,
-            "Frame matching complete: {matched}/{total} matched, {auto} auto accepted, {review} need review, {skipped} skipped".format(
+            "Video matching complete: {matched}/{total} matched, {auto} auto accepted, {review} need review, {skipped} skipped".format(
                 matched=stats["matched"],
                 total=stats["total"],
                 auto=stats["auto_accepted"],
@@ -5381,11 +5376,11 @@ async def rematch_project_task(project_id: str, preserve_manual_matches: bool = 
         )
 
         stats = _compute_stats(project.segments)
-        project.status = ProjectStatus.READY_FOR_POLISH
+        project.status = ProjectStatus.COMPLETED
         _upsert_project(project)
         await update_progress(
             project_id,
-            "ready_for_polish",
+            "completed",
             100,
             "Rematch complete: {matched}/{total} matched, {auto} auto accepted, {review} need review, {skipped} skipped".format(
                 matched=stats["matched"],
@@ -5547,11 +5542,11 @@ async def rematch_weak_segments_task(project_id: str, request: RematchWeakSegmen
         _upsert_project(project)
         if not targets:
             stats = _compute_stats(project.segments)
-            project.status = ProjectStatus.READY_FOR_POLISH
+            project.status = ProjectStatus.COMPLETED
             _upsert_project(project)
             await update_progress(
                 project_id,
-                "ready_for_polish",
+                "completed",
                 100,
                 "No weak segments need targeted rematch: {matched}/{total} matched, {review} need review".format(
                     matched=stats["matched"],
@@ -5678,11 +5673,11 @@ async def rematch_weak_segments_task(project_id: str, request: RematchWeakSegmen
             max_targets=min(120, len(targets)),
         )
         stats = _compute_stats(project.segments)
-        project.status = ProjectStatus.READY_FOR_POLISH
+        project.status = ProjectStatus.COMPLETED
         _upsert_project(project)
         await update_progress(
             project_id,
-            "ready_for_polish",
+            "completed",
             100,
             "Weak-segment rematch complete: checked {checked}, changed {changed}, validation_failed {failed}, {matched}/{total} matched, {review} need review".format(
                 checked=len(targets),
@@ -5715,7 +5710,7 @@ async def rematch_weak_segments_task(project_id: str, request: RematchWeakSegmen
 
 @router.post("/{project_id}/start")
 async def start_processing(project_id: str, background_tasks: BackgroundTasks):  # noqa: ARG001
-    """Start the full processing pipeline."""
+    """Start the video matching pipeline."""
 
     project = load_project(project_id)
     if not project:
@@ -5723,24 +5718,10 @@ async def start_processing(project_id: str, background_tasks: BackgroundTasks): 
     if project_id in _processing_tasks and not _processing_tasks[project_id].done():
         raise HTTPException(status_code=400, detail="Project is already processing")
 
-    # 匹配已完成 → 直接跳到 TTS，不清空 segments
-    if project.status in {ProjectStatus.READY_FOR_POLISH, ProjectStatus.READY_FOR_TTS}:
-        task = asyncio.create_task(_batch_generate_tts_task(project_id))
-        _processing_tasks[project_id] = task
-        project.status = ProjectStatus.GENERATING_TTS
-        project.progress = ProcessingProgress(stage="generating_tts", progress=0, message="Resuming: starting TTS generation...")
-        _upsert_project(project)
-        return {"message": "Resuming TTS generation", "project_id": project_id}
-
     # 全新开始或出错后重试 → 清空重来
-    if project.status in {ProjectStatus.COMPLETED, ProjectStatus.ERROR}:
+    if project.status in {ProjectStatus.COMPLETED, ProjectStatus.ERROR, ProjectStatus.READY_FOR_POLISH, ProjectStatus.READY_FOR_TTS}:
         project.segments = []
         project.progress = ProcessingProgress()
-        tts_dir = Path(__file__).resolve().parents[2] / "temp" / project_id / "tts"
-        if tts_dir.exists():
-            import shutil
-
-            shutil.rmtree(tts_dir, ignore_errors=True)
 
     task = asyncio.create_task(process_project_task(project_id))
     _processing_tasks[project_id] = task
@@ -5765,8 +5746,8 @@ async def stop_processing(project_id: str):
         # 如果匹配已完成（有段落带 movie_start），保留结果而不是丢弃
         matched_count = sum(1 for s in project.segments if s.movie_start is not None)
         if matched_count > 0:
-            project.status = ProjectStatus.READY_FOR_POLISH
-            project.progress.message = f"已停止。匹配结果已保留（{matched_count} 个片段已匹配），可直接继续生成语音。"
+            project.status = ProjectStatus.COMPLETED
+            project.progress.message = f"已停止。匹配结果已保留（{matched_count} 个片段已匹配）。"
         else:
             project.status = ProjectStatus.ERROR
             project.progress.message = "Cancelled by user"
@@ -6063,276 +6044,3 @@ async def rematch_segment(project_id: str, segment_id: str, request: RematchRequ
         segment.is_manual_match = False
     _upsert_project(project)
     return segment
-
-
-@router.post("/{project_id}/segments/{segment_id}/regenerate-tts")
-async def regenerate_segment_tts(project_id: str, segment_id: str):
-    """Generate TTS for one segment."""
-
-    from api.routes.settings import load_settings
-    from core.tts_service.tts_client import TTSClient
-
-    project = load_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-    segment = next((item for item in project.segments if item.id == segment_id), None)
-    if not segment:
-        raise HTTPException(status_code=404, detail="Segment not found")
-
-    text = segment.polished_text if segment.use_polished_text and segment.polished_text else segment.original_text
-    if not text:
-        raise HTTPException(status_code=400, detail="Segment has no narration text")
-
-    app_settings = load_settings()
-    tts_client = TTSClient(
-        api_base=app_settings.tts.api_base,
-        api_endpoint=app_settings.tts.api_endpoint,
-        reference_audio=app_settings.tts.reference_audio,
-        infer_mode=app_settings.tts.infer_mode,
-    )
-    try:
-        audio_path = await tts_client.generate(text, f"{project_id}_{segment_id}")
-        segment.tts_audio_path = str(audio_path)
-        segment.tts_duration = await tts_client.get_duration(str(audio_path))
-        segment.tts_status = TTSStatus.GENERATED
-        segment.tts_error = None
-    except Exception as exc:  # pragma: no cover
-        segment.tts_status = TTSStatus.FAILED
-        segment.tts_error = str(exc)
-        _upsert_project(project)
-        raise HTTPException(status_code=500, detail=f"TTS generation failed: {exc}")
-
-    _upsert_project(project)
-    return {"audio_path": audio_path, "duration": segment.tts_duration, "tts_status": segment.tts_status}
-
-async def _polish_project_task(project_id: str, style_preset: str = "movie_pro"):
-    """Background task for contextual narration polishing."""
-
-    from api.routes.settings import load_settings
-    from core.ai_service.api_manager import APIManager
-    from core.ai_service.text_polisher import TextPolisher
-
-    project = load_project(project_id)
-    if not project:
-        return
-
-    app_settings = load_settings()
-    api_manager = APIManager(api_base=app_settings.ai.api_base, api_key=app_settings.ai.api_key, model=app_settings.ai.model)
-    polisher = TextPolisher(
-        api_manager=api_manager,
-        template=app_settings.ai.polish_template,
-        language=app_settings.whisper.language,
-        temperature=app_settings.ai.temperature,
-        max_tokens=app_settings.ai.max_tokens,
-        default_style_preset=style_preset or app_settings.ai.polish_style_preset,
-        enable_de_ai_pass=app_settings.ai.enable_de_ai_pass,
-        enable_self_review=app_settings.ai.enable_self_review,
-    )
-
-    try:
-        await update_progress(project_id, "polishing", 0, "Polishing narration text...")
-        segments_with_text = [segment for segment in project.segments if segment.original_text]
-        total = len(segments_with_text)
-        if total == 0:
-            project.status = ProjectStatus.READY_FOR_TTS
-            _upsert_project(project)
-            await update_progress(project_id, "ready_for_tts", 100, "No segments need polishing")
-            return
-
-        semaphore = asyncio.Semaphore(max(1, app_settings.concurrency.polish_concurrency))
-        completed = 0
-
-        async def polish_segment(idx: int, segment: Segment):
-            nonlocal completed
-            async with semaphore:
-                prev_segment = project.segments[idx - 1] if idx > 0 else None
-                next_segment = project.segments[idx + 1] if idx + 1 < len(project.segments) else None
-                try:
-                    segment.polished_text = await polisher.rewrite_segment(
-                        text=segment.original_text,
-                        target_duration=_segment_duration(segment),
-                        prev_text=prev_segment.original_text if prev_segment else "",
-                        next_text=next_segment.original_text if next_segment else "",
-                        match_reason=segment.match_reason,
-                        style_preset=style_preset or app_settings.ai.polish_style_preset,
-                    )
-                except Exception as exc:  # pragma: no cover
-                    logger.warning(f"Polish failed for {segment.id}: {exc}")
-                    segment.polished_text = segment.original_text
-                completed += 1
-                await update_progress(project_id, "polishing", int(100 * completed / total), f"Polished {completed}/{total}")
-
-        await asyncio.gather(*(polish_segment(idx, segment) for idx, segment in enumerate(project.segments) if segment.original_text))
-        project.status = ProjectStatus.READY_FOR_TTS
-        _upsert_project(project)
-        await update_progress(project_id, "ready_for_tts", 100, "Polishing complete, ready for TTS")
-    except Exception as exc:  # pragma: no cover
-        logger.exception(f"Polish task failed: {project_id}")
-        project = load_project(project_id)
-        if project:
-            project.status = ProjectStatus.ERROR
-            project.progress.message = str(exc)
-            _upsert_project(project)
-        await update_progress(project_id, "error", 0, f"Polishing failed: {exc}")
-    finally:
-        _processing_tasks.pop(project_id, None)
-        await polisher.close()
-
-
-@router.post("/{project_id}/segments/{segment_id}/repolish")
-async def repolish_segment(project_id: str, segment_id: str, request: StartPolishRequest = StartPolishRequest()):
-    """Re-polish a single segment with contextual prompts."""
-
-    from api.routes.settings import load_settings
-    from core.ai_service.api_manager import APIManager
-    from core.ai_service.text_polisher import TextPolisher
-
-    project = load_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-    idx = next((i for i, item in enumerate(project.segments) if item.id == segment_id), None)
-    if idx is None:
-        raise HTTPException(status_code=404, detail="Segment not found")
-    segment = project.segments[idx]
-    if not segment.original_text:
-        raise HTTPException(status_code=400, detail="Segment has no original text")
-
-    app_settings = load_settings()
-    api_manager = APIManager(api_base=app_settings.ai.api_base, api_key=app_settings.ai.api_key, model=app_settings.ai.model)
-    polisher = TextPolisher(
-        api_manager=api_manager,
-        template=app_settings.ai.polish_template,
-        language=app_settings.whisper.language,
-        temperature=app_settings.ai.temperature,
-        max_tokens=app_settings.ai.max_tokens,
-        default_style_preset=request.style_preset or app_settings.ai.polish_style_preset,
-        enable_de_ai_pass=app_settings.ai.enable_de_ai_pass,
-        enable_self_review=app_settings.ai.enable_self_review,
-    )
-
-    prev_text = project.segments[idx - 1].original_text if idx > 0 else ""
-    next_text = project.segments[idx + 1].original_text if idx + 1 < len(project.segments) else ""
-    try:
-        segment.polished_text = await polisher.rewrite_segment(
-            text=segment.original_text,
-            target_duration=_segment_duration(segment),
-            prev_text=prev_text,
-            next_text=next_text,
-            match_reason=segment.match_reason,
-            style_preset=request.style_preset or app_settings.ai.polish_style_preset,
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=f"Polishing failed: {exc}")
-    finally:
-        await polisher.close()
-
-    _upsert_project(project)
-    return {"polished_text": segment.polished_text}
-
-
-@router.post("/{project_id}/start-polish")
-async def start_polishing(project_id: str, request: StartPolishRequest = StartPolishRequest()):
-    """Start the contextual polishing phase."""
-
-    project = load_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-    if project_id in _processing_tasks and not _processing_tasks[project_id].done():
-        raise HTTPException(status_code=400, detail="Project is already processing")
-    if not project.segments:
-        raise HTTPException(status_code=400, detail="Project has no segments")
-
-    task = asyncio.create_task(_polish_project_task(project_id, request.style_preset))
-    _processing_tasks[project_id] = task
-    project.status = ProjectStatus.POLISHING
-    _upsert_project(project)
-    return {"message": "Polishing started", "project_id": project_id, "style_preset": request.style_preset}
-
-
-@router.post("/{project_id}/generate-tts")
-async def batch_generate_tts(project_id: str):
-    """Start batch TTS generation."""
-
-    project = load_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-    if project_id in _processing_tasks and not _processing_tasks[project_id].done():
-        raise HTTPException(status_code=400, detail="Project is already processing")
-
-    task = asyncio.create_task(_batch_generate_tts_task(project_id))
-    _processing_tasks[project_id] = task
-    project.status = ProjectStatus.GENERATING_TTS
-    _upsert_project(project)
-    return {"message": "TTS generation started", "project_id": project_id}
-
-
-async def _batch_generate_tts_task(project_id: str):
-    """Background batch TTS generation."""
-
-    from api.routes.settings import load_settings
-    from core.tts_service.tts_client import TTSClient
-
-    project = load_project(project_id)
-    if not project:
-        return
-
-    app_settings = load_settings()
-    tts_client = TTSClient(
-        api_base=app_settings.tts.api_base,
-        api_endpoint=app_settings.tts.api_endpoint,
-        reference_audio=app_settings.tts.reference_audio,
-        infer_mode=app_settings.tts.infer_mode,
-    )
-    tts_output_dir = Path(__file__).resolve().parents[2] / "temp" / project_id / "tts"
-
-    try:
-        await update_progress(project_id, "generating_tts", 0, "Generating TTS audio...")
-        segments_with_text = [segment for segment in project.segments if segment.original_text or segment.polished_text]
-        total = len(segments_with_text)
-        completed = 0
-        semaphore = asyncio.Semaphore(max(1, app_settings.concurrency.tts_concurrency))
-
-        async def generate_one(segment: Segment):
-            nonlocal completed
-            async with semaphore:
-                text = segment.polished_text if segment.use_polished_text and segment.polished_text else segment.original_text
-                if not text:
-                    return
-                try:
-                    ref_audio = project.tts_reference_audio_path or project.reference_audio_path
-                    old_path = tts_output_dir / f"{project_id}_{segment.id}.wav"
-                    if old_path.exists():
-                        old_path.unlink()
-                    audio_path = await tts_client.generate(
-                        text,
-                        output_name=f"{project_id}_{segment.id}",
-                        output_dir=tts_output_dir,
-                        reference_audio=ref_audio,
-                    )
-                    segment.tts_audio_path = str(audio_path)
-                    segment.tts_duration = await tts_client.get_duration(str(audio_path))
-                    segment.tts_status = TTSStatus.GENERATED
-                    segment.tts_error = None
-                except Exception as exc:  # pragma: no cover
-                    segment.tts_duration = await tts_client.estimate_duration(text)
-                    segment.tts_status = TTSStatus.FAILED
-                    segment.tts_error = str(exc)
-                completed += 1
-                await update_progress(project_id, "generating_tts", int(100 * completed / max(1, total)), f"Generated TTS {completed}/{total}")
-
-        await asyncio.gather(*(generate_one(segment) for segment in segments_with_text))
-        project = load_project(project_id)
-        if project:
-            project.status = ProjectStatus.COMPLETED
-            _upsert_project(project)
-        await update_progress(project_id, "completed", 100, "TTS generation complete")
-    except Exception as exc:  # pragma: no cover
-        logger.exception(f"Batch TTS failed: {project_id}")
-        project = load_project(project_id)
-        if project:
-            project.status = ProjectStatus.ERROR
-            project.progress.message = str(exc)
-            _upsert_project(project)
-        await update_progress(project_id, "error", 0, f"TTS generation failed: {exc}")
-    finally:
-        _processing_tasks.pop(project_id, None)

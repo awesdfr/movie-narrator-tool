@@ -11,7 +11,7 @@
                 stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
           </div>
-          <span class="logo-text">解说重制</span>
+          <span class="logo-text">视频匹配</span>
         </div>
 
         <nav class="sidebar-nav">
@@ -23,15 +23,6 @@
                 <path d="M9 21V12h6v9" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
               </svg>
               <span class="nav-label">项目列表</span>
-            </router-link>
-
-            <router-link to="/settings" class="nav-item" :class="{ active: $route.name === 'Settings' }">
-              <svg class="nav-icon" viewBox="0 0 24 24" fill="none">
-                <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.8"/>
-                <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"
-                  stroke="currentColor" stroke-width="1.8"/>
-              </svg>
-              <span class="nav-label">设置</span>
             </router-link>
           </div>
 
@@ -48,40 +39,6 @@
                 <rect x="14" y="14" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.8"/>
               </svg>
               <span class="nav-label">概览</span>
-            </router-link>
-
-            <router-link :to="`/project/${projectId}/editor`" class="nav-item"
-              :class="{ active: $route.name === 'Editor' }">
-              <svg class="nav-icon" viewBox="0 0 24 24" fill="none">
-                <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"
-                  stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-                <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"
-                  stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-              </svg>
-              <span class="nav-label">片段编辑</span>
-            </router-link>
-
-            <router-link :to="`/project/${projectId}/timeline`" class="nav-item"
-              :class="{ active: $route.name === 'Timeline' }">
-              <svg class="nav-icon" viewBox="0 0 24 24" fill="none">
-                <line x1="3" y1="6" x2="21" y2="6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-                <line x1="3" y1="12" x2="21" y2="12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-                <line x1="3" y1="18" x2="21" y2="18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-                <rect x="6" y="4" width="5" height="4" rx="1" fill="currentColor" opacity=".4"/>
-                <rect x="13" y="10" width="4" height="4" rx="1" fill="currentColor" opacity=".4"/>
-                <rect x="8" y="16" width="6" height="4" rx="1" fill="currentColor" opacity=".4"/>
-              </svg>
-              <span class="nav-label">时间轴</span>
-            </router-link>
-
-            <router-link :to="`/project/${projectId}/preview`" class="nav-item"
-              :class="{ active: $route.name === 'Preview' }">
-              <svg class="nav-icon" viewBox="0 0 24 24" fill="none">
-                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"
-                  stroke="currentColor" stroke-width="1.8"/>
-                <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.8"/>
-              </svg>
-              <span class="nav-label">预览对应</span>
             </router-link>
           </div>
         </nav>
@@ -126,19 +83,16 @@
 <script setup>
 import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { useSettingsStore } from '@/stores/settings'
 import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
-import en from 'element-plus/dist/locale/en.mjs'
 
-const settingsStore = useSettingsStore()
 const route = useRoute()
 const sidebarCollapsed = ref(false)
 const appVersion = ref('2.0')
 
-const locale = computed(() => settingsStore.language === 'zh-CN' ? zhCn : en)
+const locale = zhCn
 
 const isInProject = computed(() =>
-  ['Project', 'Editor', 'Timeline', 'Preview', 'Process'].includes(route.name)
+  route.name === 'Project'
 )
 
 const projectId = computed(() => route.params.id)
@@ -147,11 +101,6 @@ const pageTitle = computed(() => {
   const map = {
     Home: '项目列表',
     Project: '概览',
-    Editor: '片段编辑',
-    Timeline: '时间轴',
-    Preview: '预览对应',
-    Process: '处理中',
-    Settings: '设置',
   }
   return map[route.name] || '页面'
 })

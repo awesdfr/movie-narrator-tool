@@ -1,4 +1,4 @@
-﻿"""API routes"""
-from . import preview, process_v2, project, settings
+"""API routes."""
+from . import files, match, preview, process_v2, project
 
-__all__ = ["preview", "process_v2", "project", "settings"]
+__all__ = ["files", "match", "preview", "process_v2", "project"]

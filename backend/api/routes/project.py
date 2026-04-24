@@ -32,8 +32,6 @@ ACTIVE_PROJECT_STATUSES = {
     ProjectStatus.ANALYZING,
     ProjectStatus.RECOGNIZING,
     ProjectStatus.MATCHING,
-    ProjectStatus.POLISHING,
-    ProjectStatus.GENERATING_TTS,
 }
 
 
@@ -93,11 +91,11 @@ def recover_stale_project(project: Project, reason: str = "任务因服务重启
 
     matched_count = len([segment for segment in project.segments if segment.movie_start is not None and segment.movie_end is not None])
     if project.status == ProjectStatus.MATCHING and matched_count > 0:
-        project.status = ProjectStatus.READY_FOR_POLISH
+        project.status = ProjectStatus.COMPLETED
         project.progress = ProcessingProgress(
-            stage="ready_for_polish",
+            stage="completed",
             progress=100.0,
-            message=f"上次匹配在服务重启时中断，已保留 {matched_count} 个已匹配片段；可继续重匹配或直接进入后续步骤。",
+            message=f"上次匹配在服务重启时中断，已保留 {matched_count} 个已匹配片段；可继续重匹配或导出草稿。",
         )
     else:
         project.status = ProjectStatus.ERROR

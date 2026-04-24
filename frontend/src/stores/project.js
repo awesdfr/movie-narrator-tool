@@ -3,8 +3,8 @@ import { computed, ref } from 'vue'
 import { processApi, projectApi } from '@/api'
 import wsService from '@/api/websocket'
 
-const TERMINAL_STAGES = ['completed', 'error', 'ready_for_tts', 'ready_for_polish']
-const ACTIVE_PROJECT_STATUSES = ['analyzing', 'matching', 'recognizing', 'polishing', 'generating_tts']
+const TERMINAL_STAGES = ['completed', 'error', 'ready_for_polish', 'ready_for_tts']
+const ACTIVE_PROJECT_STATUSES = ['analyzing', 'matching', 'recognizing']
 
 export const useProjectStore = defineStore('project', () => {
   const projects = ref([])
@@ -136,40 +136,14 @@ export const useProjectStore = defineStore('project', () => {
     await fetchProject(projectId)
   }
 
-  async function updateSegment(projectId, segmentId, data) {
-    const updated = await processApi.updateSegment(projectId, segmentId, data)
-    const index = segments.value.findIndex(segment => segment.id === segmentId)
-    if (index > -1) {
-      segments.value[index] = { ...segments.value[index], ...updated }
-    }
-    return updated
-  }
-
-  async function batchUpdateSegments(projectId, segmentIds, data) {
-    const result = await processApi.batchUpdateSegments(projectId, {
-      segment_ids: segmentIds,
-      ...data
-    })
-    const updatedSegments = result.segments || []
-    segments.value.forEach(segment => {
-      const updated = updatedSegments.find(item => item.id === segment.id)
-      if (updated) {
-        Object.assign(segment, updated)
-      } else if (segmentIds.includes(segment.id)) {
-        Object.assign(segment, data)
-      }
-    })
-    return result
+  async function rematchWeakProject(projectId, data = { preserve_manual_matches: true }) {
+    await connectProgress(projectId, 'matching', 'Rematching weak segments...')
+    await processApi.rematchWeakProject(projectId, data)
   }
 
   async function rematchProject(projectId, data = { preserve_manual_matches: true }) {
     await connectProgress(projectId, 'matching', 'Rematching eligible segments...')
     await processApi.rematchProject(projectId, data)
-  }
-
-  async function rematchWeakProject(projectId, data = { preserve_manual_matches: true }) {
-    await connectProgress(projectId, 'matching', 'Rematching weak segments...')
-    await processApi.rematchWeakProject(projectId, data)
   }
 
   async function resegment(projectId, data = { preserve_manual_matches: true }) {
@@ -189,16 +163,6 @@ export const useProjectStore = defineStore('project', () => {
       segments.value[index] = { ...segments.value[index], ...updated }
     }
     return updated
-  }
-
-  async function startPolishing(projectId, stylePreset = 'movie_pro') {
-    await connectProgress(projectId, 'polishing', 'Polishing narration...')
-    await processApi.startPolish(projectId, { style_preset: stylePreset })
-  }
-
-  async function batchGenerateTTS(projectId) {
-    await connectProgress(projectId, 'generating_tts', 'Generating TTS...')
-    await processApi.batchGenerateTTS(projectId)
   }
 
   function clearCurrentProject() {
@@ -286,14 +250,10 @@ export const useProjectStore = defineStore('project', () => {
     updateSubtitleRegions,
     startProcessing,
     stopProcessing,
-    updateSegment,
-    batchUpdateSegments,
-    rematchProject,
     rematchWeakProject,
+    rematchProject,
     resegment,
     rematchSegment,
-    startPolishing,
-    batchGenerateTTS,
     clearCurrentProject
   }
 })

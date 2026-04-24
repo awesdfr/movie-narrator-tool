@@ -15,7 +15,7 @@ from loguru import logger
 os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "16")
 os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
 
-from api.routes import files, preview, process_v2 as process, project, settings as settings_api
+from api.routes import files, match, preview, process_v2 as process, project
 from api.websocket import router as ws_router
 from config import settings
 
@@ -83,7 +83,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title=settings.app_name,
-    description="Movie narration workflow tool with segment alignment, polishing, and TTS.",
+    description="Video matching service for aligning narration video frames to original movie footage.",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -98,9 +98,9 @@ app.add_middleware(
 
 app.include_router(project.router, prefix="/api/project", tags=["project"])
 app.include_router(process.router, prefix="/api/process", tags=["process"])
-app.include_router(settings_api.router, prefix="/api/settings", tags=["settings"])
 app.include_router(preview.router, prefix="/api/preview", tags=["preview"])
 app.include_router(files.router, prefix="/api/files", tags=["files"])
+app.include_router(match.router, prefix="/api/match", tags=["match"])
 app.include_router(ws_router, prefix="/ws", tags=["websocket"])
 
 if (settings.temp_dir).exists():
