@@ -1,7 +1,11 @@
 ﻿"""Project management routes."""
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+import tempfile
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +18,7 @@ from config import settings
 from models.project import (
     Project,
     ProjectCreate,
+    ProcessingProgress,
     ProjectStatus,
     ProjectSummary,
     SubtitleRegionsUpdate,
@@ -23,6 +28,13 @@ VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m
 
 router = APIRouter()
 _projects: dict[str, Project] = {}
+ACTIVE_PROJECT_STATUSES = {
+    ProjectStatus.ANALYZING,
+    ProjectStatus.RECOGNIZING,
+    ProjectStatus.MATCHING,
+    ProjectStatus.POLISHING,
+    ProjectStatus.GENERATING_TTS,
+}
 
 
 def get_project_file_path(project_id: str) -> Path:
@@ -33,8 +45,30 @@ def save_project(project: Project) -> None:
     project.updated_at = datetime.now()
     file_path = get_project_file_path(project.id)
     file_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(file_path, 'w', encoding='utf-8') as handle:
-        json.dump(project.to_dict(), handle, ensure_ascii=False, indent=2)
+    payload = json.dumps(project.to_dict(), ensure_ascii=False, indent=2)
+    with tempfile.NamedTemporaryFile(
+        mode='w',
+        encoding='utf-8',
+        dir=file_path.parent,
+        prefix=f"{file_path.stem}.",
+        suffix='.tmp',
+        delete=False,
+    ) as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+        temp_path = Path(handle.name)
+    for attempt in range(8):
+        try:
+            os.replace(temp_path, file_path)
+            break
+        except PermissionError:
+            if attempt == 7:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                finally:
+                    raise
+            time.sleep(0.05 * (attempt + 1))
     _projects[project.id] = project
 
 
@@ -53,17 +87,45 @@ def load_project(project_id: str) -> Optional[Project]:
     return project
 
 
+def recover_stale_project(project: Project, reason: str = "任务因服务重启或异常中断，请重新点击开始处理或重匹配。") -> bool:
+    if project.status not in ACTIVE_PROJECT_STATUSES:
+        return False
+
+    matched_count = len([segment for segment in project.segments if segment.movie_start is not None and segment.movie_end is not None])
+    if project.status == ProjectStatus.MATCHING and matched_count > 0:
+        project.status = ProjectStatus.READY_FOR_POLISH
+        project.progress = ProcessingProgress(
+            stage="ready_for_polish",
+            progress=100.0,
+            message=f"上次匹配在服务重启时中断，已保留 {matched_count} 个已匹配片段；可继续重匹配或直接进入后续步骤。",
+        )
+    else:
+        project.status = ProjectStatus.ERROR
+        project.progress = ProcessingProgress(
+            stage="error",
+            progress=0.0,
+            message=reason,
+        )
+    save_project(project)
+    return True
+
+
 def validate_video_file(path: Path, name: str) -> None:
     if path.suffix.lower() not in VIDEO_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"{name} 格式不支持: {path.suffix}")
 
     try:
-        from core.video_processor.analysis_video import ensure_analysis_video_sync
+        if path.stat().st_size <= 0:
+            raise HTTPException(status_code=400, detail=f"{name} 文件为空: {path}")
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"{name} 无法访问: {path}") from exc
+
+    try:
         import cv2
 
-        capture = cv2.VideoCapture(ensure_analysis_video_sync(str(path)))
+        capture = cv2.VideoCapture(str(path))
         if not capture.isOpened():
-            raise HTTPException(status_code=400, detail=f"{name} 无法打开，文件可能已损坏: {path}")
+            logger.warning(f"Skipped strict open validation for {name}: {path}")
         capture.release()
     except ImportError:
         logger.warning(f"OpenCV not available, skipped validation for {name}: {path}")
@@ -76,6 +138,8 @@ async def list_projects():
 
     for file_path in settings.projects_dir.glob('*.json'):
         if file_path.name == 'settings.json':
+            continue
+        if "." in file_path.stem:
             continue
         try:
             with open(file_path, 'r', encoding='utf-8') as handle:
@@ -102,37 +166,53 @@ async def list_projects():
 
 @router.post('/create', response_model=Project)
 async def create_project(request: ProjectCreate):
-    movie_path = Path(request.movie_path)
-    narration_path = Path(request.narration_path)
+    name = request.name.strip()
+    movie_path_str = request.movie_path.strip()
+    narration_path_str = request.narration_path.strip()
+    reference_audio_path = request.reference_audio_path.strip() if request.reference_audio_path else None
+    tts_reference_audio_path = request.tts_reference_audio_path.strip() if request.tts_reference_audio_path else None
+    subtitle_path = request.subtitle_path.strip() if request.subtitle_path else None
+
+    if not name:
+        raise HTTPException(status_code=400, detail='项目名称不能为空')
+    if not movie_path_str:
+        raise HTTPException(status_code=400, detail='请选择原电影文件')
+    if not narration_path_str:
+        raise HTTPException(status_code=400, detail='请选择解说视频文件')
+
+    movie_path = Path(movie_path_str)
+    narration_path = Path(narration_path_str)
 
     if not movie_path.exists():
-        raise HTTPException(status_code=400, detail=f"原电影文件不存在: {request.movie_path}")
+        raise HTTPException(status_code=400, detail=f"原电影文件不存在: {movie_path_str}")
     if not narration_path.exists():
-        raise HTTPException(status_code=400, detail=f"解说视频文件不存在: {request.narration_path}")
+        raise HTTPException(status_code=400, detail=f"解说视频文件不存在: {narration_path_str}")
 
-    validate_video_file(movie_path, '原电影')
-    validate_video_file(narration_path, '解说视频')
+    await asyncio.gather(
+        asyncio.to_thread(validate_video_file, movie_path, '原电影'),
+        asyncio.to_thread(validate_video_file, narration_path, '解说视频'),
+    )
 
     for optional_path, label in [
-        (request.reference_audio_path, '参考音频'),
-        (request.tts_reference_audio_path, 'TTS 参考音频'),
-        (request.subtitle_path, '字幕文件'),
+        (reference_audio_path, '参考音频'),
+        (tts_reference_audio_path, 'TTS 参考音频'),
+        (subtitle_path, '字幕文件'),
     ]:
         if optional_path and not Path(optional_path).exists():
             raise HTTPException(status_code=400, detail=f"{label}不存在: {optional_path}")
 
-    if request.subtitle_path and Path(request.subtitle_path).suffix.lower() != '.srt':
+    if subtitle_path and Path(subtitle_path).suffix.lower() != '.srt':
         raise HTTPException(status_code=400, detail='当前仅支持 SRT 字幕文件')
 
     project = Project(
         id=f"proj_{uuid.uuid4().hex[:12]}",
-        name=request.name,
+        name=name,
         status=ProjectStatus.CREATED,
-        movie_path=request.movie_path,
-        narration_path=request.narration_path,
-        reference_audio_path=request.reference_audio_path,
-        tts_reference_audio_path=request.tts_reference_audio_path,
-        subtitle_path=request.subtitle_path,
+        movie_path=movie_path_str,
+        narration_path=narration_path_str,
+        reference_audio_path=reference_audio_path,
+        tts_reference_audio_path=tts_reference_audio_path,
+        subtitle_path=subtitle_path,
     )
     save_project(project)
     logger.info(f"Created project {project.id}: {project.name}")

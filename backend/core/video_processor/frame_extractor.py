@@ -7,9 +7,32 @@ from pathlib import Path
 from typing import Optional
 
 import cv2
+import numpy as np
 from loguru import logger
 
 from .analysis_video import ensure_analysis_video
+
+
+def read_image_unicode(path: str | Path):
+    image_path = Path(path)
+    if not image_path.exists():
+        return None
+    data = np.fromfile(str(image_path), dtype=np.uint8)
+    if data.size == 0:
+        return None
+    return cv2.imdecode(data, cv2.IMREAD_COLOR)
+
+
+def write_image_unicode(path: str | Path, image, params: Optional[list[int]] = None) -> bool:
+    image_path = Path(path)
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    suffix = image_path.suffix.lower()
+    ext = '.jpg' if suffix in {'', '.jpg', '.jpeg'} else suffix
+    success, encoded = cv2.imencode(ext, image, params or [])
+    if not success:
+        return False
+    image_path.write_bytes(encoded.tobytes())
+    return True
 
 
 class FrameExtractor:
@@ -59,13 +82,14 @@ class FrameExtractor:
             if not capture.isOpened():
                 raise ValueError(f'Cannot open video: {capture_path}')
             fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
-            target_frame = max(0, int(time_sec * fps)) if fps > 0 else 0
+            target_frame = max(0, round(time_sec * fps)) if fps > 0 else 0
             capture.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
             ok, frame = capture.read()
             capture.release()
             if not ok:
                 raise ValueError(f'Cannot extract frame at {time_sec:.3f}s from {capture_path}')
-            cv2.imwrite(str(output_path), frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+            if not write_image_unicode(output_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 90]):
+                raise ValueError(f'Cannot write frame image: {output_path}')
             return output_path
 
         return await asyncio.to_thread(_extract)
@@ -83,11 +107,12 @@ class FrameExtractor:
             return thumb_path
 
         def _resize() -> Path:
-            image = cv2.imread(str(base_frame))
+            image = read_image_unicode(base_frame)
             if image is None:
                 raise ValueError(f'Cannot read frame image: {base_frame}')
             resized = cv2.resize(image, size)
-            cv2.imwrite(str(thumb_path), resized, [cv2.IMWRITE_JPEG_QUALITY, 88])
+            if not write_image_unicode(thumb_path, resized, [cv2.IMWRITE_JPEG_QUALITY, 88]):
+                raise ValueError(f'Cannot write thumbnail image: {thumb_path}')
             return thumb_path
 
         thumb = await asyncio.to_thread(_resize)

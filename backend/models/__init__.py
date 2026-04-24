@@ -6,7 +6,7 @@ from .segment import (
     SegmentStatus,
     SegmentType,
 )
-from .project import Project, ProjectStatus, ProcessingProgress
+from .project import ExportMode, Project, ProjectStatus, ProcessingProgress
 from .settings import (
     AISettings,
     AppSettings,
@@ -29,6 +29,7 @@ __all__ = [
     "Project",
     "ProjectStatus",
     "ProcessingProgress",
+    "ExportMode",
     "AISettings",
     "AppSettings",
     "ConcurrencySettings",

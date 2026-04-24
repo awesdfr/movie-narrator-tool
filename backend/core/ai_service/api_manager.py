@@ -60,6 +60,26 @@ class APIManager:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
+    def _extract_text_content(self, payload) -> str:
+        if isinstance(payload, str):
+            return payload.strip()
+        if isinstance(payload, list):
+            parts: list[str] = []
+            for item in payload:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "\n".join(part.strip() for part in parts if part and part.strip()).strip()
+        if isinstance(payload, dict):
+            for key in ("text", "content", "output_text"):
+                value = payload.get(key)
+                if value is not None:
+                    return self._extract_text_content(value)
+        return ""
+
     async def chat(
         self,
         messages: list[dict],
@@ -98,8 +118,13 @@ class APIManager:
             response.raise_for_status()
 
             data = response.json()
-            content = data["choices"][0]["message"]["content"]
-            return content.strip()
+            message = data["choices"][0].get("message", {})
+            content = self._extract_text_content(message.get("content"))
+            if not content:
+                content = self._extract_text_content(data["choices"][0].get("text"))
+            if not content:
+                raise RuntimeError("AI API returned an empty response payload")
+            return content
 
         except httpx.HTTPStatusError as e:
             logger.error(f"API请求失败: {e.response.status_code} - {e.response.text}")

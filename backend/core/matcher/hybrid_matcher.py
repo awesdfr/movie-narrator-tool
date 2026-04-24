@@ -206,8 +206,8 @@ class HybridMatcher:
         3. 如果只有一个结果，直接使用
         4. 如果都没有结果，返回 None
         """
-        frame_conf = frame_result["confidence"] if frame_result else 0
-        audio_conf = audio_result["confidence"] if audio_result else 0
+        frame_conf = frame_result.get("confidence", 0) if frame_result else 0
+        audio_conf = audio_result.get("confidence", 0) if audio_result else 0
 
         # 两者都没有结果
         if not frame_result and not audio_result:

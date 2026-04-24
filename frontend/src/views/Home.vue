@@ -104,14 +104,14 @@
 
         <!-- Actions -->
         <div class="card-actions" @click.stop>
-          <button class="action-btn" title="复制" @click.stop="duplicateProject(project)">
+          <button type="button" class="action-btn" title="复制" @click.stop="duplicateProject(project)">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
               <rect x="9" y="9" width="13" height="13" rx="2" stroke="currentColor" stroke-width="2"/>
               <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"
                 stroke="currentColor" stroke-width="2"/>
             </svg>
           </button>
-          <button class="action-btn danger" title="删除" @click.stop="confirmDelete(project)">
+          <button type="button" class="action-btn danger" title="删除" @click.stop="confirmDelete(project)">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
               <polyline points="3 6 5 6 21 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
               <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"
@@ -155,13 +155,13 @@
               </el-option>
             </el-select>
             <div class="file-actions">
-              <button class="icon-btn" @click="refreshFiles('movies')" title="刷新">
+              <button type="button" class="icon-btn" @click="refreshFiles('movies')" title="刷新">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
                   <polyline points="23 4 23 10 17 10" stroke="currentColor" stroke-width="2"/>
                   <path d="M20.49 15a9 9 0 11-2.12-9.36L23 10" stroke="currentColor" stroke-width="2"/>
                 </svg>
               </button>
-              <button class="icon-btn" @click="openFolder('movies')" title="打开文件夹">
+              <button type="button" class="icon-btn" @click="openFolder('movies')" title="打开文件夹">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
                   <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"
                     stroke="currentColor" stroke-width="2"/>
@@ -184,13 +184,13 @@
               </el-option>
             </el-select>
             <div class="file-actions">
-              <button class="icon-btn" @click="refreshFiles('narrations')" title="刷新">
+              <button type="button" class="icon-btn" @click="refreshFiles('narrations')" title="刷新">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
                   <polyline points="23 4 23 10 17 10" stroke="currentColor" stroke-width="2"/>
                   <path d="M20.49 15a9 9 0 11-2.12-9.36L23 10" stroke="currentColor" stroke-width="2"/>
                 </svg>
               </button>
-              <button class="icon-btn" @click="openFolder('narrations')" title="打开文件夹">
+              <button type="button" class="icon-btn" @click="openFolder('narrations')" title="打开文件夹">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
                   <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"
                     stroke="currentColor" stroke-width="2"/>
@@ -213,13 +213,13 @@
               </el-option>
             </el-select>
             <div class="file-actions">
-              <button class="icon-btn" @click="refreshFiles('reference_audio')" title="刷新">
+              <button type="button" class="icon-btn" @click="refreshFiles('reference_audio')" title="刷新">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
                   <polyline points="23 4 23 10 17 10" stroke="currentColor" stroke-width="2"/>
                   <path d="M20.49 15a9 9 0 11-2.12-9.36L23 10" stroke="currentColor" stroke-width="2"/>
                 </svg>
               </button>
-              <button class="icon-btn" @click="openFolder('reference_audio')" title="打开文件夹">
+              <button type="button" class="icon-btn" @click="openFolder('reference_audio')" title="打开文件夹">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
                   <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"
                     stroke="currentColor" stroke-width="2"/>
@@ -241,7 +241,7 @@
               </el-option>
             </el-select>
             <div class="file-actions">
-              <button class="icon-btn" @click="refreshFiles('reference_audio')" title="刷新">
+              <button type="button" class="icon-btn" @click="refreshFiles('reference_audio')" title="刷新">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
                   <polyline points="23 4 23 10 17 10" stroke="currentColor" stroke-width="2"/>
                   <path d="M20.49 15a9 9 0 11-2.12-9.36L23 10" stroke="currentColor" stroke-width="2"/>
@@ -264,13 +264,13 @@
               </el-option>
             </el-select>
             <div class="file-actions">
-              <button class="icon-btn" @click="refreshFiles('subtitles')" title="刷新">
+              <button type="button" class="icon-btn" @click="refreshFiles('subtitles')" title="刷新">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
                   <polyline points="23 4 23 10 17 10" stroke="currentColor" stroke-width="2"/>
                   <path d="M20.49 15a9 9 0 11-2.12-9.36L23 10" stroke="currentColor" stroke-width="2"/>
                 </svg>
               </button>
-              <button class="icon-btn" @click="openFolder('subtitles')" title="打开文件夹">
+              <button type="button" class="icon-btn" @click="openFolder('subtitles')" title="打开文件夹">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
                   <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"
                     stroke="currentColor" stroke-width="2"/>
@@ -292,7 +292,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, watch } from 'vue'
+import { nextTick, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useProjectStore } from '@/stores/project'
@@ -309,6 +309,15 @@ const createForm = ref({
   name: '', movie_path: '', narration_path: '',
   reference_audio_path: '', tts_reference_audio_path: '', subtitle_path: ''
 })
+
+const EMPTY_CREATE_FORM = {
+  name: '',
+  movie_path: '',
+  narration_path: '',
+  reference_audio_path: '',
+  tts_reference_audio_path: '',
+  subtitle_path: ''
+}
 
 const movieFiles      = ref([])
 const narrationFiles  = ref([])
@@ -328,7 +337,42 @@ const createRules = {
 onMounted(() => projectStore.fetchProjects())
 
 function openCreate() {
+  createForm.value = { ...EMPTY_CREATE_FORM }
   showCreateDialog.value = true
+}
+
+function firstPath(files) {
+  return files.find(file => file?.path)?.path || ''
+}
+
+function normalizeOptionalPath(path) {
+  const value = typeof path === 'string' ? path.trim() : ''
+  return value || null
+}
+
+function buildCreatePayload() {
+  return {
+    name: createForm.value.name.trim(),
+    movie_path: createForm.value.movie_path.trim(),
+    narration_path: createForm.value.narration_path.trim(),
+    reference_audio_path: normalizeOptionalPath(createForm.value.reference_audio_path),
+    tts_reference_audio_path: normalizeOptionalPath(createForm.value.tts_reference_audio_path),
+    subtitle_path: normalizeOptionalPath(createForm.value.subtitle_path)
+  }
+}
+
+async function preloadCreateDialog() {
+  await Promise.all(['movies', 'narrations', 'reference_audio', 'subtitles'].map(type => refreshFiles(type)))
+
+  if (!createForm.value.movie_path) {
+    createForm.value.movie_path = firstPath(movieFiles.value)
+  }
+  if (!createForm.value.narration_path) {
+    createForm.value.narration_path = firstPath(narrationFiles.value)
+  }
+
+  await nextTick()
+  createFormRef.value?.clearValidate?.()
 }
 
 function getStatusClass(status) {
@@ -374,14 +418,37 @@ function goToProject(project) {
 }
 
 async function handleCreate() {
+  const payload = buildCreatePayload()
+
+  if (!payload.name) {
+    ElMessage.error('请输入项目名称')
+    return
+  }
+  if (!payload.movie_path) {
+    ElMessage.error('请选择原电影文件')
+    return
+  }
+  if (!payload.narration_path) {
+    ElMessage.error('请选择解说视频文件')
+    return
+  }
+
+  createForm.value = {
+    ...createForm.value,
+    ...payload,
+    reference_audio_path: payload.reference_audio_path || '',
+    tts_reference_audio_path: payload.tts_reference_audio_path || '',
+    subtitle_path: payload.subtitle_path || ''
+  }
+
   const valid = await createFormRef.value.validate().catch(() => false)
   if (!valid) return
   creating.value = true
   try {
-    const project = await projectStore.createProject(createForm.value)
+    const project = await projectStore.createProject(payload)
     ElMessage.success('项目创建成功')
     showCreateDialog.value = false
-    createForm.value = { name:'', movie_path:'', narration_path:'', reference_audio_path:'', tts_reference_audio_path:'', subtitle_path:'' }
+    createForm.value = { ...EMPTY_CREATE_FORM }
     router.push(`/project/${project.id}`)
   } catch {} finally { creating.value = false }
 }
@@ -417,8 +484,10 @@ async function openFolder(type) {
   try { await filesApi.openFolder(type); ElMessage.success('已打开文件夹，放入文件后点击刷新') } catch {}
 }
 
-watch(showCreateDialog, v => {
-  if (v) Promise.all(['movies','narrations','reference_audio','subtitles'].map(t => refreshFiles(t)))
+watch(showCreateDialog, async value => {
+  if (value) {
+    await preloadCreateDialog()
+  }
 })
 </script>
 

@@ -54,6 +54,10 @@ class MatchCandidate(BaseModel):
     visual_confidence: float = Field(default=0.0, description="Visual match confidence")
     audio_confidence: float = Field(default=0.0, description="Audio match confidence")
     temporal_confidence: float = Field(default=0.0, description="Temporal consistency confidence")
+    rank_gap: float = Field(default=0.0, description="Score gap between the best and second-best candidate")
+    verification_score: float = Field(default=0.0, description="Additional geometric verification score")
+    geometric_inliers: int = Field(default=0, description="Average inlier count from geometric verification")
+    geometric_inlier_ratio: float = Field(default=0.0, description="Average inlier ratio from geometric verification")
     stability_score: float = Field(default=0.0, description="Evidence stability score")
     candidate_quality: float = Field(default=0.0, description="Average matched movie-frame quality")
     query_quality: float = Field(default=0.0, description="Average narration-frame quality")
@@ -86,6 +90,20 @@ class Segment(BaseModel):
     stability_score: float = Field(default=0.0, description="Selected evidence stability")
     duration_gap: float = Field(default=0.0, description="Absolute duration gap")
     match_reason: str = Field(default="", description="Why the match was selected")
+    match_type: str = Field(default="exact", description="Match classification for export/composition")
+    evidence_summary: str = Field(default="", description="Compact evidence summary for UI/export")
+    speed_changed: bool = Field(
+        default=False,
+        description="Whether the narration visual was detected as speed-changed against the movie source",
+    )
+    source_speed_ratio: float = Field(
+        default=1.0,
+        description="Movie source duration divided by narration duration when speed change is detected",
+    )
+    speed_change_confidence: float = Field(
+        default=0.0,
+        description="Confidence for the detected visual speed change",
+    )
     speech_likelihood: float = Field(default=0.0, description="Estimated narration speech likelihood")
     audio_activity_label: str = Field(default="unknown", description="Audio activity label")
     voiceprint_similarity: Optional[float] = Field(default=None, description="Narrator voice similarity")
@@ -135,6 +153,8 @@ class Segment(BaseModel):
                 "stability_score": 0.81,
                 "duration_gap": 0.4,
                 "match_reason": "Strong visual cluster with stable timeline",
+                "match_type": "exact",
+                "evidence_summary": "visual strong / temporal stable",
                 "speech_likelihood": 0.92,
                 "audio_activity_label": "active",
                 "review_required": False,
@@ -199,6 +219,11 @@ class SegmentUpdate(BaseModel):
     stability_score: Optional[float] = None
     duration_gap: Optional[float] = None
     match_reason: Optional[str] = None
+    match_type: Optional[str] = None
+    evidence_summary: Optional[str] = None
+    speed_changed: Optional[bool] = None
+    source_speed_ratio: Optional[float] = None
+    speed_change_confidence: Optional[float] = None
     alignment_status: Optional[AlignmentStatus] = None
     review_required: Optional[bool] = None
     selected_candidate_id: Optional[str] = None

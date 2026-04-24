@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -12,24 +13,60 @@ from loguru import logger
 from models.project import SubtitleMaskMode
 from .analysis_video import ensure_analysis_video_sync
 
-try:
-    from paddleocr import PaddleOCR
-
-    PADDLE_OCR_AVAILABLE = True
-except ImportError:  # pragma: no cover
-    PaddleOCR = None
-    PADDLE_OCR_AVAILABLE = False
+PaddleOCR = None
+PADDLE_OCR_AVAILABLE: Optional[bool] = None
 
 _OCR_INSTANCE: Optional["PaddleOCR"] = None
+_OCR_INIT_ERROR: Optional[str] = None
+_OCR_ERROR_LOGGED = False
+
+
+def _ensure_paddleocr_import() -> bool:
+    global PaddleOCR, PADDLE_OCR_AVAILABLE
+    if PADDLE_OCR_AVAILABLE is not None:
+        return PADDLE_OCR_AVAILABLE
+    os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+    try:
+        from paddleocr import PaddleOCR as _PaddleOCR
+
+        PaddleOCR = _PaddleOCR
+        PADDLE_OCR_AVAILABLE = True
+    except ImportError:  # pragma: no cover
+        PaddleOCR = None
+        PADDLE_OCR_AVAILABLE = False
+    return PADDLE_OCR_AVAILABLE
 
 
 def _get_ocr() -> "PaddleOCR":
-    global _OCR_INSTANCE
+    global _OCR_INSTANCE, _OCR_INIT_ERROR
     if _OCR_INSTANCE is None:
-        if not PADDLE_OCR_AVAILABLE:
+        if not _ensure_paddleocr_import():
             raise RuntimeError("PaddleOCR is not available")
+        if _OCR_INIT_ERROR is not None:
+            raise RuntimeError(_OCR_INIT_ERROR)
         logger.info("Loading PaddleOCR for subtitle masking")
-        _OCR_INSTANCE = PaddleOCR(use_angle_cls=False, lang="ch", show_log=False, use_gpu=False)
+        last_error: Optional[Exception] = None
+        for kwargs in (
+            {"use_angle_cls": False, "lang": "ch", "show_log": False},
+            {"use_angle_cls": False, "lang": "ch"},
+        ):
+            try:
+                _OCR_INSTANCE = PaddleOCR(**kwargs)
+                _OCR_INIT_ERROR = None
+                break
+            except TypeError as exc:
+                last_error = exc
+                continue
+            except Exception as exc:
+                message = str(exc)
+                if "unknown argument" in message.lower() or "unexpected keyword" in message.lower():
+                    last_error = exc
+                    continue
+                _OCR_INIT_ERROR = message
+                raise RuntimeError(message) from exc
+        if _OCR_INSTANCE is None:
+            _OCR_INIT_ERROR = str(last_error or "PaddleOCR initialization failed")
+            raise RuntimeError(_OCR_INIT_ERROR)
     return _OCR_INSTANCE
 
 
@@ -45,7 +82,7 @@ class SubtitleMaskerConfig:
     max_box_height_ratio: float = 0.18
     median_blur_ksize: int = 21
     ocr_confidence_threshold: float = 0.55
-    use_ocr: bool = True
+    use_ocr: bool = False
     use_heuristic: bool = True
 
 
@@ -156,7 +193,7 @@ class SubtitleMasker:
             heuristic_mask = self._detect_heuristic(frame)
             if heuristic_mask is not None and heuristic_mask.any():
                 masks.append(heuristic_mask)
-        if self.config.use_ocr and PADDLE_OCR_AVAILABLE:
+        if self.config.use_ocr and _ensure_paddleocr_import():
             ocr_mask = self._detect_with_ocr(frame)
             if ocr_mask is not None and ocr_mask.any():
                 masks.append(ocr_mask)
@@ -318,10 +355,14 @@ class SubtitleMasker:
         return mask if mask.any() else None
 
     def _detect_with_ocr(self, frame: np.ndarray) -> Optional[np.ndarray]:
+        global _OCR_ERROR_LOGGED
         try:
             ocr = _get_ocr()
         except Exception as exc:  # pragma: no cover
-            logger.debug(f"OCR initialization failed for subtitle masking: {exc}")
+            if not _OCR_ERROR_LOGGED:
+                logger.debug(f"OCR initialization failed for subtitle masking: {exc}")
+                _OCR_ERROR_LOGGED = True
+            self.config.use_ocr = False
             return None
 
         height, width = frame.shape[:2]

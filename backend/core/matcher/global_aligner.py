@@ -88,17 +88,63 @@ class GlobalAlignmentOptimizer:
         return results
 
     def _base_score(self, candidate: Optional[MatchCandidate], segment: Segment) -> float:
+        ordered_candidates = sorted(segment.match_candidates or [], key=lambda item: item.score or item.confidence or 0.0, reverse=True)
+        segment_best_score = max(
+            ((item.score or item.confidence or 0.0) for item in ordered_candidates),
+            default=0.0,
+        )
+        segment_best_temporal = max(
+            (max(0.0, item.temporal_confidence or 0.0) for item in ordered_candidates),
+            default=0.0,
+        )
+        segment_top_candidate = ordered_candidates[0] if ordered_candidates else None
         if candidate is None:
             if segment.segment_type == SegmentType.NON_MOVIE:
                 return 0.05
-            return -2.0
+            return -2.0 - min(0.4, segment_best_score * 0.35)
         score = candidate.score or candidate.confidence or 0.0
+        temporal_confidence = max(0.0, candidate.temporal_confidence or 0.0)
+        verification_score = max(0.0, candidate.verification_score or 0.0)
+        rank_gap = max(0.0, candidate.rank_gap or 0.0)
+        score_gap_to_segment_best = max(0.0, segment_best_score - score)
         # 高置信候选额外奖励，强化 DP 对高质量匹配的偏好
         if score >= 0.92:
             score += 0.06 * min(1.0, (score - 0.92) / 0.08)
         elif score >= 0.85:
             score += 0.03 * (score - 0.85) / 0.07
+        score += min(0.10, verification_score * 0.12)
+        score += min(0.12, temporal_confidence * 0.16)
+        score += min(0.05, rank_gap * 2.5)
         score += min(0.08, max(0.0, candidate.stability_score) * 0.10)
+        if temporal_confidence >= 0.65:
+            score += 0.04
+        elif temporal_confidence >= 0.35:
+            score += 0.02
+        if verification_score >= 0.55:
+            score += 0.03
+        if temporal_confidence < 0.08 and verification_score < 0.42:
+            score -= 0.18
+        elif temporal_confidence < 0.16 and rank_gap < 0.01 and verification_score < 0.40:
+            score -= 0.08
+        if score_gap_to_segment_best > 0.08:
+            score -= min(0.32, score_gap_to_segment_best * 2.8)
+        elif score_gap_to_segment_best > 0.03:
+            score -= min(0.16, score_gap_to_segment_best * 1.9)
+        if segment_best_temporal >= 0.35 and temporal_confidence + 0.20 < segment_best_temporal:
+            score -= 0.06
+        if segment_top_candidate is not None and segment_top_candidate is not candidate:
+            top_temporal = max(0.0, segment_top_candidate.temporal_confidence or 0.0)
+            top_verification = max(0.0, segment_top_candidate.verification_score or 0.0)
+            if score_gap_to_segment_best > 0.08 and top_temporal + 0.05 >= temporal_confidence:
+                score -= 0.12
+            if top_temporal >= temporal_confidence + 0.20:
+                score -= 0.10
+            if top_verification >= verification_score + 0.08 and score_gap_to_segment_best > 0.04:
+                score -= 0.06
+        if verification_score < 0.38:
+            score -= min(0.10, (0.38 - verification_score) * 0.20)
+        if rank_gap < 0.0025:
+            score -= min(0.06, (0.0025 - rank_gap) * 12.0)
         score -= min(0.10, max(0.0, candidate.low_info_ratio) * 0.12)
         return score
 
@@ -177,10 +223,12 @@ class GlobalAlignmentOptimizer:
             }
 
         confidence = candidate.confidence or candidate.score
+        verification_score = max(0.0, candidate.verification_score or 0.0)
+        evidence_strong = verification_score >= 0.85
         if segment.is_manual_match:
             status = AlignmentStatus.MANUAL
             review_required = False
-        elif confidence >= self.auto_accept_threshold:
+        elif confidence >= self.auto_accept_threshold and evidence_strong:
             status = AlignmentStatus.AUTO_ACCEPTED
             review_required = False
         elif confidence >= self.review_threshold:

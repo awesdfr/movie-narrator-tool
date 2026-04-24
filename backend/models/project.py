@@ -42,6 +42,13 @@ class SubtitleMaskMode(str, Enum):
     MANUAL_ONLY = "manual_only"
 
 
+class ExportMode(str, Enum):
+    """Draft export strategy."""
+
+    CREATIVE_DRAFT = "creative_draft"
+    RESTORE_DRAFT = "restore_draft"
+
+
 class SubtitleRegion(BaseModel):
     """Normalized subtitle region for a video source."""
 
@@ -97,7 +104,28 @@ class Project(BaseModel):
     output_name: Optional[str] = Field(None, description="Output name")
     benchmark_accuracy: Optional[float] = Field(None, description="Last benchmark accuracy")
     benchmark_manifest: Optional[str] = Field(None, description="Last benchmark manifest path")
+    benchmark_false_match_rate: Optional[float] = Field(None, description="Last benchmark false match rate")
+    benchmark_low_confidence_recall: Optional[float] = Field(None, description="Last benchmark recall on incorrect samples")
+    benchmark_report_path: Optional[str] = Field(None, description="Last benchmark report path")
+    benchmark_updated_at: Optional[datetime] = Field(None, description="Last benchmark update time")
+    visual_audit_score: Optional[float] = Field(None, description="Last visual audit score average")
+    visual_audit_metric: Optional[str] = Field(None, description="Last visual audit metric")
+    visual_audit_threshold: Optional[float] = Field(None, description="Last visual audit low-score threshold")
+    visual_audit_below_threshold: Optional[int] = Field(None, description="Visual audit samples below threshold")
+    visual_audit_report_path: Optional[str] = Field(None, description="Last visual audit report path")
+    visual_audit_updated_at: Optional[datetime] = Field(None, description="Last visual audit update time")
+    last_jianying_draft_path: Optional[str] = Field(None, description="Last exported Jianying draft directory")
+    rights_confirmed: bool = Field(default=False, description="Whether commercial rights have been confirmed")
+    platform_risk_acknowledged: bool = Field(default=False, description="Whether platform dedup risk has been acknowledged")
     match_version: str = Field(default="v2_alignment_pipeline", description="Active match pipeline version")
+    default_export_mode: ExportMode = Field(
+        default=ExportMode.RESTORE_DRAFT,
+        description="Default draft export mode",
+    )
+    creative_template: str = Field(
+        default="story_mix",
+        description="Creative planner template used for draft reconstruction",
+    )
 
     class Config:
         json_schema_extra = {
@@ -123,9 +151,9 @@ class Project(BaseModel):
 class ProjectCreate(BaseModel):
     """Project creation payload."""
 
-    name: str = Field(..., description="Project name")
-    movie_path: str = Field(..., description="Movie path")
-    narration_path: str = Field(..., description="Narration path")
+    name: str = Field(..., min_length=1, description="Project name")
+    movie_path: str = Field(..., min_length=1, description="Movie path")
+    narration_path: str = Field(..., min_length=1, description="Narration path")
     reference_audio_path: Optional[str] = Field(None, description="Voiceprint reference audio path")
     tts_reference_audio_path: Optional[str] = Field(None, description="TTS reference audio path")
     subtitle_path: Optional[str] = Field(None, description="Optional SRT subtitle path")

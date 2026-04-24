@@ -42,8 +42,19 @@ def load_settings() -> AppSettings:
         try:
             with open(SETTINGS_FILE, 'r', encoding='utf-8') as handle:
                 data = json.load(handle)
+            match_data = data.get('match', {}) if isinstance(data, dict) else {}
+            missing_dino_defaults = isinstance(match_data, dict) and any(
+                field not in match_data
+                for field in (
+                    'use_dinov2_retrieval',
+                    'dino_model_name',
+                    'dino_batch_size',
+                    'dino_top_k',
+                    'dino_index_interval',
+                )
+            )
             app_settings = AppSettings.model_validate(data)
-            if _migrate_settings(app_settings):
+            if _migrate_settings(app_settings) or missing_dino_defaults:
                 save_settings(app_settings)
             return app_settings
         except Exception as exc:

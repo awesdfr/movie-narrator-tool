@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import bisect
+import hashlib
 import os
 import pickle
 import subprocess
@@ -52,6 +53,7 @@ class FrameMatcher:
         self._movie_duration: float = 0.0
         self._sample_step_seconds: float = 1.0
         self._indexed_video_path: Optional[str] = None
+        self._indexed_capture_path: Optional[str] = None
         # Precomputed packed bit arrays for vectorized prefilter & scoring
         self._idx_ahash_packed: Optional[np.ndarray] = None        # (N, 32) uint8
         self._idx_phash_packed: Optional[np.ndarray] = None        # (N, 8)  uint8
@@ -63,6 +65,7 @@ class FrameMatcher:
         self._idx_spatial_color_hist: Optional[np.ndarray] = None # (N, 432) float32 L2-normalised 3x3 spatial color hist
         self._idx_grad_hist: Optional[np.ndarray] = None          # (N, 128) float32 L2-normalised gradient orientation hist
         self._subtitle_maskers: dict[str, SubtitleMasker] = {}
+        self._query_feature_cache: dict[tuple[str, float, float, str], list[dict]] = {}
         self._subtitle_regions_by_role = {
             "movie": self._normalize_regions(movie_subtitle_regions),
             "narration": self._normalize_regions(narration_subtitle_regions),
@@ -72,6 +75,79 @@ class FrameMatcher:
         # time_scales kept for fallback _score_candidate path only; vectorised path always uses 1.0
         self._time_scales = (1.0,) if self.fast_mode else (0.95, 1.0, 1.05)
 
+    def _normalize_video_path(self, video_path: str) -> str:
+        try:
+            return str(Path(video_path).resolve()).lower()
+        except Exception:
+            return str(Path(video_path)).lower()
+
+    def _segments_signature(self, segments: list[dict]) -> str:
+        hasher = hashlib.sha1()
+        for segment in segments:
+            hasher.update(f"{round(float(segment['start']), 3)}:{round(float(segment['end']), 3)}|".encode("utf-8"))
+        hasher.update(str(self.fast_mode).encode("utf-8"))
+        return hasher.hexdigest()
+
+    def _canonicalize_mask_signature(self, signature) -> tuple:
+        if not signature:
+            return tuple()
+        try:
+            enabled, mode, role, region_signature = signature
+        except (TypeError, ValueError):
+            return tuple(signature) if isinstance(signature, (list, tuple)) else (signature,)
+        canonical_regions = []
+        for region in region_signature or ():
+            if not isinstance(region, (list, tuple)):
+                continue
+            if len(region) >= 8:
+                _, x, y, width, height, region_enabled, start_time, end_time = region[:8]
+            elif len(region) == 7:
+                x, y, width, height, region_enabled, start_time, end_time = region
+            else:
+                continue
+            canonical_regions.append(
+                self._region_signature_entry(
+                    str(role),
+                    {
+                        'x': x,
+                        'y': y,
+                        'width': width,
+                        'height': height,
+                        'enabled': region_enabled,
+                        'start_time': start_time,
+                        'end_time': end_time,
+                    },
+                )
+            )
+        return (bool(enabled), str(mode), str(role), tuple(canonical_regions))
+
+    def _region_signature_entry(self, source_role: str, region: dict) -> tuple:
+        x = float(region.get('x', 0.0))
+        y = float(region.get('y', 0.0))
+        width = float(region.get('width', 0.0))
+        height = float(region.get('height', 0.0))
+
+        if source_role in {"movie", "narration"}:
+            x = 0.0 if width >= 0.92 or x <= 0.05 else round(round(x / 0.05) * 0.05, 2)
+            width = 1.0 if width >= 0.92 else round(round(width / 0.05) * 0.05, 2)
+            y = round(round(y / 0.10) * 0.10, 2)
+            height = round(round(height / 0.10) * 0.10, 2)
+        else:
+            x = round(x, 4)
+            y = round(y, 4)
+            width = round(width, 4)
+            height = round(height, 4)
+
+        return (
+            x,
+            y,
+            width,
+            height,
+            bool(region.get('enabled', True)),
+            None if region.get('start_time') is None else round(float(region.get('start_time')), 3),
+            None if region.get('end_time') is None else round(float(region.get('end_time')), 3),
+        )
+
     async def build_index(
         self,
         video_path: str,
@@ -80,6 +156,7 @@ class FrameMatcher:
         progress_callback: Optional[Callable[[float, str], None]] = None,
     ):
         video_path = str(video_path)
+        normalized_video_path = self._normalize_video_path(video_path)
         capture_path = await ensure_analysis_video(video_path)
         cache_path = Path(cache_path) if cache_path else None
         loop = asyncio.get_running_loop()
@@ -90,16 +167,17 @@ class FrameMatcher:
                 with open(cache_path, 'rb') as handle:
                     payload = pickle.load(handle)
                 if (
-                    payload.get('video_path') == video_path
+                    payload.get('video_path') == normalized_video_path
                     and payload.get('cache_version') == self.CACHE_VERSION
-                    and payload.get('mask_signature') == mask_signature
+                    and self._canonicalize_mask_signature(payload.get('mask_signature')) == self._canonicalize_mask_signature(mask_signature)
                     and payload.get('sample_step_seconds') == interval
                 ):
                     self._index = payload['index']
                     self._times = payload['times']
                     self._movie_duration = payload['movie_duration']
                     self._sample_step_seconds = payload['sample_step_seconds']
-                    self._indexed_video_path = video_path
+                    self._indexed_video_path = normalized_video_path
+                    self._indexed_capture_path = str(capture_path)
                     await asyncio.to_thread(self._precompute_packed_hashes)
                     if progress_callback:
                         progress_callback(100.0, f"Loaded movie frame index cache ({len(self._index)} samples)")
@@ -248,7 +326,8 @@ class FrameMatcher:
         self._index = index
         self._times = [entry['time'] for entry in index]
         self._movie_duration = duration
-        self._indexed_video_path = capture_path
+        self._indexed_video_path = normalized_video_path
+        self._indexed_capture_path = str(capture_path)
         await asyncio.to_thread(self._precompute_packed_hashes)
 
         if cache_path:
@@ -257,7 +336,7 @@ class FrameMatcher:
                 pickle.dump(
                     {
                         'cache_version': self.CACHE_VERSION,
-                        'video_path': video_path,
+                        'video_path': normalized_video_path,
                         'index': self._index,
                         'times': self._times,
                         'movie_duration': self._movie_duration,
@@ -343,7 +422,12 @@ class FrameMatcher:
         if not candidate_starts:
             return None
 
-        search_radius = max(1.5, self._sample_step_seconds * (3.0 if relaxed else 2.0))
+        if duration <= 1.15 and not relaxed:
+            search_radius = max(0.55, min(0.85, self._sample_step_seconds * 0.70))
+        elif duration <= 2.20 and not relaxed:
+            search_radius = max(0.80, min(1.20, self._sample_step_seconds * 0.95))
+        else:
+            search_radius = max(1.5, self._sample_step_seconds * (3.0 if relaxed else 2.0))
         movie_duration = self._movie_duration
 
         _index_ref = self._index
@@ -380,7 +464,8 @@ class FrameMatcher:
                         'cap': qfc['hash'], 'cpp': qfc['phash'],
                         'hist': qfv['hist'].reshape(-1),
                         'color_hist': qf.get('color_hist', np.zeros(48, dtype='float32')),
-                        'spatial_color_hist': qf.get('spatial_color_hist', np.zeros(192, dtype='float32')),
+                        'spatial_color_hist': qf.get('spatial_color_hist', np.zeros(432, dtype='float32')),
+                        'grad_hist': qf.get('grad_hist', np.zeros(128, dtype='float32')),
                         'edge': qf.get('edge_hash'),
                         'offset': float(qf['offset']),
                         'quality': float(qf['quality_score']),
@@ -420,18 +505,39 @@ class FrameMatcher:
                             spatial_color_sim = np.clip((q_spatial_color_mat @ _idx_spatial_color_hist.T + 1.0) / 2.0, 0.0, 1.0)  # (Q, N)
 
                             hash_combined = ah * 0.55 + ph * 0.45
-                            full_score_mat = hash_combined * 0.30 + hist_sim * 0.05 + color_hist_sim * 0.30 + spatial_color_sim * 0.35
+                            if _idx_grad_hist is not None:
+                                q_grad_mat = np.stack([x['grad_hist'] for x in q_hashes_valid])  # (Q, 128)
+                                q_norms3 = np.linalg.norm(q_grad_mat, axis=1, keepdims=True)
+                                q_norms3[q_norms3 == 0] = 1.0
+                                q_grad_mat = q_grad_mat / q_norms3
+                                grad_sim = np.clip((q_grad_mat @ _idx_grad_hist.T + 1.0) / 2.0, 0.0, 1.0)  # (Q, N)
+                                full_score_mat = (
+                                    hash_combined * 0.34
+                                    + hist_sim * 0.08
+                                    + color_hist_sim * 0.16
+                                    + spatial_color_sim * 0.22
+                                    + grad_sim * 0.20
+                                )
+                            else:
+                                full_score_mat = hash_combined * 0.36 + hist_sim * 0.08 + color_hist_sim * 0.22 + spatial_color_sim * 0.34
                         else:
                             full_score_mat = full_score_mat * 0.80 + hist_sim * 0.20
 
                     if len(cands) > 250:
-                        best_per_idx = np.maximum(full_score_mat, center_score_mat).max(axis=0)  # (N,)
+                        combined_prefilter = np.maximum(full_score_mat, center_score_mat)
                         quick: list[tuple[float, float]] = []
                         for cs in cands:
-                            l = bisect.bisect_left(_times_ref, cs - search_radius)
-                            r = min(bisect.bisect_right(_times_ref, cs + search_radius), l + 8)
-                            best_q = float(best_per_idx[l:r].max()) if l < r else 0.0
-                            quick.append((best_q, cs))
+                            frame_scores: list[float] = []
+                            for q_i, query in enumerate(q_hashes_valid):
+                                target_time = cs + float(query["offset"])
+                                l = bisect.bisect_left(_times_ref, target_time - search_radius)
+                                r = bisect.bisect_right(_times_ref, target_time + search_radius)
+                                if l < r:
+                                    frame_scores.append(float(combined_prefilter[q_i, l:r].max()))
+                            if frame_scores:
+                                frame_scores.sort(reverse=True)
+                                keep = max(1, int(len(frame_scores) * 0.70))
+                                quick.append((float(np.mean(frame_scores[:keep])), cs))
                         quick.sort(reverse=True)
                         cands = [cs for _, cs in quick[:200]]
 
@@ -449,71 +555,123 @@ class FrameMatcher:
                         edge_sim = 1.0 - _tbl[
                             q_ep[:, None, :] ^ _idx_edge_p[None, :, :]
                         ].sum(2, dtype=np.int32) / 144.0  # (Q, N)
-                        combined = combined * 0.86 + edge_sim * 0.14
+                    combined = combined * 0.80 + edge_sim * 0.20
 
-                # For each (query_frame, candidate), find max combined score in time window
+                # For each (query_frame, candidate), find max combined score in time window.
+                # Use exact offset timing first; optional scale candidates are only allowed
+                # when they clearly improve the phase-locked score.
                 offsets = np.array([x['offset'] for x in q_hashes_valid])   # (Q,)
-                per_qc = np.zeros((Q, n_cands), dtype=np.float32)
-                for q_i in range(Q):
-                    offset = offsets[q_i]
-                    row = combined[q_i]  # (N,) view
-                    for c_i, cs in enumerate(cands):
-                        l = bisect.bisect_left(_times_ref, cs + offset - search_radius)
-                        r = bisect.bisect_right(_times_ref, cs + offset + search_radius)
-                        if l < r:
-                            per_qc[q_i, c_i] = float(row[l:r].max())
-
-                # Aggregate per-candidate: trimmed mean (top 70%) + coverage + consistency
-                sorted_scores = np.sort(per_qc, axis=0)[::-1]          # (Q, n_cands)
-                keep = max(1, int(Q * 0.70))
-                trimmed_mean = sorted_scores[:keep].mean(axis=0)        # (n_cands,)
-                coverage = (per_qc > 0).sum(axis=0) / Q                # (n_cands,)
-                matched_mask = per_qc > 0                               # (Q, n_cands) bool
                 q_low_info = np.array([float(x['low_info']) for x in q_hashes_valid])  # (Q,)
                 q_quality = np.array([x['quality'] for x in q_hashes_valid])            # (Q,)
-                matched_count_per_cand = matched_mask.sum(axis=0).clip(1)              # (n_cands,)
-                low_info_ratio = (q_low_info[:, None] * matched_mask).sum(axis=0) / matched_count_per_cand
-                quality_penalty = np.maximum(0.0, low_info_ratio - 0.25) * 0.25
-                mean_c = per_qc.mean(axis=0)
-                std_c = per_qc.std(axis=0)
-                cv = std_c / (mean_c + 1e-6)
-                consistency_bonus = np.maximum(0.0, 0.06 * (1.0 - np.minimum(1.0, cv * 2.0)))
-                q_quality_weighted = (q_quality[:, None] * matched_mask).sum(axis=0) / matched_count_per_cand
-                stability = np.clip(coverage * 0.5 + q_quality_weighted * 0.5, 0.0, 1.0)
+                scale_options = (1.0,) if self.fast_mode else (1.0, 0.88, 0.94, 1.07, 1.16)
+                phase_radius = max(0.38, min(search_radius, float(self._sample_step_seconds) * 0.62))
+                best_scores_by_candidate = np.zeros(n_cands, dtype=np.float32)
+                best_scales_by_candidate = np.ones(n_cands, dtype=np.float32)
+                best_match_count_by_candidate = np.zeros(n_cands, dtype=np.int32)
+                best_stability_by_candidate = np.zeros(n_cands, dtype=np.float32)
+                best_quality_by_candidate = np.zeros(n_cands, dtype=np.float32)
+                best_low_info_by_candidate = np.ones(n_cands, dtype=np.float32)
 
-                candidate_scores = np.clip(
-                    trimmed_mean * 0.87 + coverage * 0.09 + consistency_bonus
-                    + stability * 0.02 - quality_penalty,
-                    0.0, 1.0,
-                )
+                for scale in scale_options:
+                    per_qc = np.zeros((Q, n_cands), dtype=np.float32)
+                    for q_i in range(Q):
+                        offset = float(offsets[q_i]) * float(scale)
+                        row = combined[q_i]  # (N,) view
+                        for c_i, cs in enumerate(cands):
+                            l = bisect.bisect_left(_times_ref, cs + offset - phase_radius)
+                            r = bisect.bisect_right(_times_ref, cs + offset + phase_radius)
+                            if l < r:
+                                per_qc[q_i, c_i] = float(row[l:r].max())
+
+                    sorted_scores = np.sort(per_qc, axis=0)[::-1]          # (Q, n_cands)
+                    keep = Q if Q <= 3 else max(2, int(Q * 0.75))
+                    trimmed_mean = sorted_scores[:keep].mean(axis=0)        # (n_cands,)
+                    floor_score = sorted_scores[keep - 1] if keep > 0 else trimmed_mean
+                    coverage = (per_qc > 0).sum(axis=0) / Q                # (n_cands,)
+                    matched_mask = per_qc > 0                               # (Q, n_cands) bool
+                    matched_count_per_cand = matched_mask.sum(axis=0).clip(1)
+                    low_info_ratio = (q_low_info[:, None] * matched_mask).sum(axis=0) / matched_count_per_cand
+                    quality_penalty = np.maximum(0.0, low_info_ratio - 0.25) * 0.25
+                    mean_c = per_qc.mean(axis=0)
+                    std_c = per_qc.std(axis=0)
+                    cv = std_c / (mean_c + 1e-6)
+                    consistency_bonus = np.maximum(0.0, 0.06 * (1.0 - np.minimum(1.0, cv * 2.0)))
+                    q_quality_weighted = (q_quality[:, None] * matched_mask).sum(axis=0) / matched_count_per_cand
+                    stability = np.clip(coverage * 0.5 + q_quality_weighted * 0.5, 0.0, 1.0)
+
+                    candidate_scores_for_scale = np.clip(
+                        trimmed_mean * 0.74 + floor_score * 0.13 + coverage * 0.09 + consistency_bonus
+                        + stability * 0.02 - quality_penalty,
+                        0.0, 1.0,
+                    )
+                    if scale != 1.0:
+                        candidate_scores_for_scale = np.where(
+                            candidate_scores_for_scale >= best_scores_by_candidate + 0.028,
+                            candidate_scores_for_scale,
+                            0.0,
+                        )
+
+                    improved = candidate_scores_for_scale > best_scores_by_candidate
+                    best_scores_by_candidate = np.where(improved, candidate_scores_for_scale, best_scores_by_candidate)
+                    best_scales_by_candidate = np.where(improved, float(scale), best_scales_by_candidate)
+                    best_match_count_by_candidate = np.where(
+                        improved,
+                        matched_mask.sum(axis=0).astype(np.int32),
+                        best_match_count_by_candidate,
+                    )
+                    best_stability_by_candidate = np.where(improved, stability, best_stability_by_candidate)
+                    best_quality_by_candidate = np.where(improved, q_quality_weighted, best_quality_by_candidate)
+                    best_low_info_by_candidate = np.where(improved, low_info_ratio, best_low_info_by_candidate)
+
+                candidate_scores = best_scores_by_candidate
                 best_c = int(candidate_scores.argmax())
                 best_cs = cands[best_c]
+                best_scale = float(best_scales_by_candidate[best_c])
+                second_score = float(np.partition(candidate_scores, -2)[-2]) if len(candidate_scores) > 1 else 0.0
+                best_confidence = float(candidate_scores[best_c])
+                rank_gap = max(0.0, best_confidence - second_score)
+                if rank_gap < 0.005 and best_confidence < 0.93:
+                    best_confidence *= 0.82
+                elif rank_gap < 0.015 and best_confidence < 0.90:
+                    best_confidence *= 0.90
+                elif rank_gap < 0.030 and best_confidence < 0.86:
+                    best_confidence *= 0.95
                 return {
                     'start': max(0.0, best_cs),
-                    'end': min(movie_duration or best_cs + duration, best_cs + duration),
-                    'confidence': float(candidate_scores[best_c]),
-                    'match_count': int(matched_mask[:, best_c].sum()),
-                    'stability_score': float(stability[best_c]),
-                    'candidate_quality': float(q_quality_weighted[best_c]),
+                    'end': min(movie_duration or best_cs + duration * best_scale, best_cs + duration * best_scale),
+                    'confidence': best_confidence,
+                    'rank_gap': rank_gap,
+                    'match_count': int(best_match_count_by_candidate[best_c]),
+                    'stability_score': float(best_stability_by_candidate[best_c]),
+                    'candidate_quality': float(best_quality_by_candidate[best_c]),
                     'query_quality': float(q_quality.mean()),
-                    'low_info_ratio': float(low_info_ratio[best_c]),
+                    'low_info_ratio': float(best_low_info_by_candidate[best_c]),
+                    'time_scale': best_scale,
                 }
 
             # ── Fallback: original per-candidate Python loop (when precomputed data unavailable) ──
             result: Optional[dict] = None
+            second_best_confidence = 0.0
             for candidate_start in cands:
                 score_info = self._score_candidate(candidate_start, query_features, search_radius)
                 if result is None or score_info['score'] > result['confidence']:
+                    if result is not None:
+                        second_best_confidence = max(second_best_confidence, float(result['confidence']))
                     result = {
                         'start': max(0.0, candidate_start),
                         'end': min(movie_duration or candidate_start + duration, candidate_start + duration),
                         'confidence': score_info['score'],
+                        'rank_gap': 0.0,
                         'match_count': score_info['match_count'],
                         'stability_score': score_info['stability_score'],
                         'candidate_quality': score_info['candidate_quality'],
                         'query_quality': score_info['query_quality'],
                         'low_info_ratio': score_info['low_info_ratio'],
                     }
+                else:
+                    second_best_confidence = max(second_best_confidence, float(score_info['score']))
+            if result is not None:
+                result['rank_gap'] = max(0.0, float(result['confidence']) - second_best_confidence)
             return result
 
         best = await asyncio.to_thread(_run_search)
@@ -538,6 +696,7 @@ class FrameMatcher:
             'start': float(best['start']),
             'end': float(best['end']),
             'confidence': confidence,
+            'rank_gap': float(best.get('rank_gap', 0.0)),
             'match_count': int(best['match_count']),
             'stability_score': float(best.get('stability_score', 0.0)),
             'candidate_quality': float(best.get('candidate_quality', 0.0)),
@@ -556,6 +715,8 @@ class FrameMatcher:
         narration_duration: float | None = None,
         allow_non_sequential: bool = False,
         max_concurrent: int = 8,
+        precomputed_features_map: Optional[dict[str, list[dict]]] = None,
+        expected_time_map: Optional[dict[str, float]] = None,
     ) -> list[dict]:
         total = max(1, len(segments))
 
@@ -564,14 +725,15 @@ class FrameMatcher:
             results: list[dict] = []
             last_movie_time: Optional[float] = None
             for idx, segment in enumerate(segments, start=1):
-                expected_time = None
-                if movie_duration and narration_duration and narration_duration > 0:
+                expected_time = (expected_time_map or {}).get(segment.get('id'))
+                if expected_time is None and movie_duration and narration_duration and narration_duration > 0:
                     expected_time = float(segment['start']) / narration_duration * movie_duration
                 if last_movie_time is not None:
                     expected_time = max(expected_time or 0.0, last_movie_time)
                 result = await self.match_segment(
                     narration_path, float(segment['start']), float(segment['end']),
                     time_hint=expected_time, relaxed=False, strict_window=expected_time is not None,
+                    precomputed_features=(precomputed_features_map or {}).get(segment.get('id')),
                 )
                 payload = {'id': segment.get('id'), 'success': False, 'start': None, 'end': None, 'confidence': 0.0, 'match_count': 0}
                 if result:
@@ -590,12 +752,15 @@ class FrameMatcher:
         async def _match_one(i: int, segment: dict) -> None:
             nonlocal completed
             async with semaphore:
-                expected_time = None
-                if movie_duration and narration_duration and narration_duration > 0:
+                expected_time = (expected_time_map or {}).get(segment.get('id'))
+                if expected_time is None and movie_duration and narration_duration and narration_duration > 0:
                     expected_time = float(segment['start']) / narration_duration * movie_duration
                 result = await self.match_segment(
                     narration_path, float(segment['start']), float(segment['end']),
-                    time_hint=expected_time, relaxed=False, strict_window=False,
+                    time_hint=expected_time,
+                    relaxed=expected_time is not None,
+                    strict_window=expected_time is not None,
+                    precomputed_features=(precomputed_features_map or {}).get(segment.get('id')),
                 )
                 payload = {'id': segment.get('id'), 'success': False, 'start': None, 'end': None, 'confidence': 0.0, 'match_count': 0}
                 if result:
@@ -611,12 +776,140 @@ class FrameMatcher:
             for r, seg in zip(ordered, segments)
         ]
 
-    async def _extract_segment_features(self, video_path: str, start_time: float, end_time: float) -> list[dict]:
+    def _feature_cache_key(self, capture_path: str, start_time: float, end_time: float, role: str) -> tuple[str, float, float, str]:
+        return (str(capture_path), round(float(start_time), 3), round(float(end_time), 3), role)
+
+    def _sample_times_for_segment(self, start_time: float, end_time: float) -> list[float]:
         duration = max(0.2, end_time - start_time)
         sample_count = max(2, min(6, int(duration * (2.0 if not self.fast_mode else 1.0))))
-        sample_times = [start_time + duration * (i + 0.5) / sample_count for i in range(sample_count)]
+        return [start_time + duration * (i + 0.5) / sample_count for i in range(sample_count)]
+
+    def _finalize_segment_features(self, features: list[dict]) -> list[dict]:
+        if not features:
+            return []
+        strong_features = [feature for feature in features if feature['quality_score'] >= 0.20 and not feature['is_low_info']]
+        if len(strong_features) >= max(2, len(features) // 3):
+            return strong_features
+        features = sorted(features, key=lambda item: item['quality_score'], reverse=True)
+        keep_count = max(2, min(len(features), max(3, int(len(features) * 0.75))))
+        return features[:keep_count]
+
+    async def precompute_segment_features_batch(
+        self,
+        video_path: str,
+        segments: list[dict],
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        cache_path: Optional[Path] = None,
+    ) -> dict[str, list[dict]]:
+        normalized_video_path = self._normalize_video_path(video_path)
         capture_path = await ensure_analysis_video(video_path)
         subtitle_masker = await asyncio.to_thread(self._get_subtitle_masker, str(capture_path), "narration", True)
+        cache_path = Path(cache_path) if cache_path else None
+        mask_signature = self._mask_signature_for_role("narration")
+        segments_signature = self._segments_signature(segments)
+
+        feature_map: dict[str, list[dict]] = {}
+        pending: list[dict] = []
+        if cache_path and cache_path.exists():
+            try:
+                with open(cache_path, "rb") as handle:
+                    payload = pickle.load(handle)
+                if (
+                    payload.get("cache_version") == self.CACHE_VERSION
+                    and payload.get("video_path") == normalized_video_path
+                    and self._canonicalize_mask_signature(payload.get("mask_signature")) == self._canonicalize_mask_signature(mask_signature)
+                    and payload.get("segments_signature") == segments_signature
+                ):
+                    cached_map = payload.get("feature_map", {})
+                    for segment in segments:
+                        seg_id = str(segment.get("id"))
+                        features = cached_map.get(seg_id, [])
+                        feature_map[seg_id] = features
+                        cache_key = self._feature_cache_key(str(capture_path), float(segment["start"]), float(segment["end"]), "narration")
+                        self._query_feature_cache[cache_key] = features
+                    if feature_map:
+                        return feature_map
+            except Exception as exc:
+                logger.warning(f"Failed to load narration feature cache {cache_path}: {exc}")
+
+        for segment in segments:
+            seg_id = str(segment.get("id"))
+            start_time = float(segment["start"])
+            end_time = float(segment["end"])
+            cache_key = self._feature_cache_key(str(capture_path), start_time, end_time, "narration")
+            cached = self._query_feature_cache.get(cache_key)
+            if cached is not None:
+                feature_map[seg_id] = cached
+                continue
+            pending.append(
+                {
+                    "id": seg_id,
+                    "start": start_time,
+                    "end": end_time,
+                    "sample_times": self._sample_times_for_segment(start_time, end_time),
+                    "cache_key": cache_key,
+                }
+            )
+
+        if not pending:
+            return feature_map
+
+        def _extract_batch() -> dict[str, list[dict]]:
+            capture = cv2.VideoCapture(str(capture_path))
+            if not capture.isOpened():
+                raise ValueError(f'Cannot open narration video: {capture_path}')
+            built: dict[str, list[dict]] = {}
+            try:
+                total = len(pending)
+                for idx, item in enumerate(pending, start=1):
+                    features: list[dict] = []
+                    for sample_time in item["sample_times"]:
+                        capture.set(cv2.CAP_PROP_POS_MSEC, sample_time * 1000)
+                        ok, frame = capture.read()
+                        if not ok:
+                            continue
+                        features.append(
+                            {
+                                "offset": sample_time - item["start"],
+                                **self._frame_features_lite(frame, subtitle_masker=subtitle_masker, frame_time=sample_time),
+                            }
+                        )
+                    built[item["id"]] = self._finalize_segment_features(features)
+                    if progress_callback and (idx == 1 or idx == total or idx % 25 == 0):
+                        progress_callback(idx, total)
+            finally:
+                capture.release()
+            return built
+
+        built = await asyncio.to_thread(_extract_batch)
+        for item in pending:
+            segment_features = built.get(item["id"], [])
+            self._query_feature_cache[item["cache_key"]] = segment_features
+            feature_map[item["id"]] = segment_features
+        if cache_path:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(cache_path, "wb") as handle:
+                pickle.dump(
+                    {
+                        "cache_version": self.CACHE_VERSION,
+                        "video_path": normalized_video_path,
+                        "mask_signature": mask_signature,
+                        "segments_signature": segments_signature,
+                        "feature_map": feature_map,
+                    },
+                    handle,
+                )
+        return feature_map
+
+    async def _extract_segment_features(self, video_path: str, start_time: float, end_time: float) -> list[dict]:
+        capture_path = await ensure_analysis_video(video_path)
+        cache_key = self._feature_cache_key(str(capture_path), start_time, end_time, "narration")
+        cached = self._query_feature_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        subtitle_masker = await asyncio.to_thread(self._get_subtitle_masker, str(capture_path), "narration", True)
+        sample_times = self._sample_times_for_segment(start_time, end_time)
 
         def _extract() -> list[dict]:
             capture = cv2.VideoCapture(str(capture_path))
@@ -635,16 +928,296 @@ class FrameMatcher:
                     }
                 )
             capture.release()
-            if not features:
-                return []
-            strong_features = [feature for feature in features if feature['quality_score'] >= 0.20 and not feature['is_low_info']]
-            if len(strong_features) >= max(2, len(features) // 3):
-                return strong_features
-            features.sort(key=lambda item: item['quality_score'], reverse=True)
-            keep_count = max(2, min(len(features), max(3, int(len(features) * 0.75))))
-            return features[:keep_count]
+            return self._finalize_segment_features(features)
 
-        return await asyncio.to_thread(_extract)
+        features = await asyncio.to_thread(_extract)
+        self._query_feature_cache[cache_key] = features
+        return features
+
+    async def verify_candidates(
+        self,
+        narration_path: str,
+        segment_start: float,
+        segment_end: float,
+        candidates: list[dict],
+    ) -> dict[tuple[float, float], dict]:
+        if not candidates or not self._indexed_capture_path:
+            return {}
+
+        narration_capture_path = await ensure_analysis_video(narration_path)
+        movie_capture_path = self._indexed_capture_path
+        narration_masker = await asyncio.to_thread(self._get_subtitle_masker, str(narration_capture_path), "narration", True)
+        movie_masker = await asyncio.to_thread(self._get_subtitle_masker, str(movie_capture_path), "movie", False)
+
+        duration = max(0.2, segment_end - segment_start)
+        sample_positions = [0.35, 0.65] if duration < 2.4 else [0.2, 0.5, 0.8]
+
+        def _verify() -> dict[tuple[float, float], dict]:
+            narr_cap = cv2.VideoCapture(str(narration_capture_path))
+            movie_cap = cv2.VideoCapture(str(movie_capture_path))
+            if not narr_cap.isOpened() or not movie_cap.isOpened():
+                raise ValueError("Cannot open videos for candidate verification")
+            orb = cv2.ORB_create(nfeatures=480, fastThreshold=16)
+            matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
+            results: dict[tuple[float, float], dict] = {}
+
+            def _read_processed_frame(cap, t: float, masker, role: str):
+                cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t) * 1000)
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    return None
+                h, w = frame.shape[:2]
+                if w > 512:
+                    nh = max(32, int(h * 512.0 / w))
+                    frame = cv2.resize(frame, (512, nh), interpolation=cv2.INTER_AREA)
+                processed = self._preprocess_frame(frame, masker, frame_time=t)
+                gray = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
+                return gray
+
+            try:
+                for candidate in candidates:
+                    candidate_start = float(candidate["start"])
+                    candidate_end = float(candidate["end"])
+                    candidate_duration = max(0.2, candidate_end - candidate_start)
+                    frame_scores: list[float] = []
+                    inlier_counts: list[int] = []
+                    inlier_ratios: list[float] = []
+                    for pos in sample_positions:
+                        q_time = segment_start + duration * pos
+                        c_time = candidate_start + candidate_duration * pos
+                        q_gray = _read_processed_frame(narr_cap, q_time, narration_masker, "narration")
+                        c_gray = _read_processed_frame(movie_cap, c_time, movie_masker, "movie")
+                        if q_gray is None or c_gray is None:
+                            continue
+
+                        q_hist = cv2.calcHist([q_gray], [0], None, [32], [0, 256]).astype("float32")
+                        c_hist = cv2.calcHist([c_gray], [0], None, [32], [0, 256]).astype("float32")
+                        q_hist /= max(float(q_hist.sum()), 1.0)
+                        c_hist /= max(float(c_hist.sum()), 1.0)
+                        hist_score = float((cv2.compareHist(q_hist, c_hist, cv2.HISTCMP_CORREL) + 1.0) / 2.0)
+
+                        kp1, des1 = orb.detectAndCompute(q_gray, None)
+                        kp2, des2 = orb.detectAndCompute(c_gray, None)
+                        inliers = 0
+                        inlier_ratio = 0.0
+                        warp_score = 0.0
+                        if des1 is not None and des2 is not None and len(kp1) >= 8 and len(kp2) >= 8:
+                            matches = matcher.knnMatch(des1, des2, k=2)
+                            good = []
+                            for pair in matches:
+                                if len(pair) < 2:
+                                    continue
+                                m, n = pair
+                                if m.distance < 0.78 * n.distance:
+                                    good.append(m)
+                            if len(good) >= 8:
+                                src_pts = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+                                dst_pts = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+                                H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+                                if mask is not None:
+                                    inliers = int(mask.sum())
+                                    inlier_ratio = inliers / max(1, len(good))
+                                    if H is not None and inliers >= 8:
+                                        try:
+                                            warped = cv2.warpPerspective(c_gray, H, (q_gray.shape[1], q_gray.shape[0]))
+                                            diff = float(np.mean(np.abs(q_gray.astype(np.float32) - warped.astype(np.float32)))) / 255.0
+                                            warp_score = max(0.0, 1.0 - diff)
+                                        except cv2.error:
+                                            warp_score = 0.0
+                            elif good:
+                                inliers = len(good)
+                                inlier_ratio = min(1.0, len(good) / max(12.0, min(len(kp1), len(kp2))))
+                        geom_score = min(1.0, inliers / 40.0) * 0.30 + inlier_ratio * 0.30 + warp_score * 0.40
+                        frame_scores.append(max(hist_score * 0.20 + geom_score * 0.80, hist_score * 0.45))
+                        inlier_counts.append(inliers)
+                        inlier_ratios.append(inlier_ratio)
+
+                    if frame_scores:
+                        results[(candidate_start, candidate_end)] = {
+                            "verification_score": float(np.mean(frame_scores)),
+                            "geometric_inliers": int(round(float(np.mean(inlier_counts)))) if inlier_counts else 0,
+                            "geometric_inlier_ratio": float(np.mean(inlier_ratios)) if inlier_ratios else 0.0,
+                        }
+                    else:
+                        results[(candidate_start, candidate_end)] = {
+                            "verification_score": 0.0,
+                            "geometric_inliers": 0,
+                            "geometric_inlier_ratio": 0.0,
+                        }
+            finally:
+                narr_cap.release()
+                movie_cap.release()
+            return results
+
+        return await asyncio.to_thread(_verify)
+
+    async def verify_segment_matches(
+        self,
+        narration_path: str,
+        segments: list[dict],
+    ) -> dict[str, dict]:
+        """Batch verify already-selected matches while reusing video handles.
+
+        This is intentionally stricter than the retrieval score. Retrieval can find
+        visually similar frames, but auto-accept must prove local geometry or strong
+        structural similarity on the exact selected timeline.
+        """
+        if not segments or not self._indexed_capture_path:
+            return {}
+
+        narration_capture_path = await ensure_analysis_video(narration_path)
+        movie_capture_path = self._indexed_capture_path
+        narration_masker = await asyncio.to_thread(self._get_subtitle_masker, str(narration_capture_path), "narration", True)
+        movie_masker = await asyncio.to_thread(self._get_subtitle_masker, str(movie_capture_path), "movie", False)
+
+        payload = [
+            {
+                "id": str(item["id"]),
+                "narration_start": float(item["narration_start"]),
+                "narration_end": float(item["narration_end"]),
+                "movie_start": float(item["movie_start"]),
+                "movie_end": float(item["movie_end"]),
+            }
+            for item in segments
+            if item.get("id") and item.get("movie_start") is not None and item.get("movie_end") is not None
+        ]
+        if not payload:
+            return {}
+
+        def _verify() -> dict[str, dict]:
+            narr_cap = cv2.VideoCapture(str(narration_capture_path))
+            movie_cap = cv2.VideoCapture(str(movie_capture_path))
+            if not narr_cap.isOpened() or not movie_cap.isOpened():
+                raise ValueError("Cannot open videos for batch match verification")
+
+            orb = cv2.ORB_create(nfeatures=640, fastThreshold=14)
+            matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
+            results: dict[str, dict] = {}
+
+            def _read_processed_frame(cap, t: float, masker):
+                cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t) * 1000)
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    return None
+                h, w = frame.shape[:2]
+                if w > 512:
+                    nh = max(32, int(h * 512.0 / w))
+                    frame = cv2.resize(frame, (512, nh), interpolation=cv2.INTER_AREA)
+                processed = self._preprocess_frame(frame, masker, frame_time=t)
+                return cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
+
+            def _score_pair(q_gray, c_gray) -> tuple[float, int, float, float, float]:
+                if q_gray.shape != c_gray.shape:
+                    c_gray = cv2.resize(c_gray, (q_gray.shape[1], q_gray.shape[0]), interpolation=cv2.INTER_AREA)
+
+                q_hist = cv2.calcHist([q_gray], [0], None, [32], [0, 256]).astype("float32")
+                c_hist = cv2.calcHist([c_gray], [0], None, [32], [0, 256]).astype("float32")
+                q_hist /= max(float(q_hist.sum()), 1.0)
+                c_hist /= max(float(c_hist.sum()), 1.0)
+                hist_score = float((cv2.compareHist(q_hist, c_hist, cv2.HISTCMP_CORREL) + 1.0) / 2.0)
+
+                q_edges = cv2.Canny(q_gray, 60, 140)
+                c_edges = cv2.Canny(c_gray, 60, 140)
+                edge_diff = float(np.mean(np.abs(q_edges.astype(np.float32) - c_edges.astype(np.float32)))) / 255.0
+                edge_score = max(0.0, 1.0 - edge_diff)
+
+                kp1, des1 = orb.detectAndCompute(q_gray, None)
+                kp2, des2 = orb.detectAndCompute(c_gray, None)
+                inliers = 0
+                inlier_ratio = 0.0
+                warp_score = 0.0
+                if des1 is not None and des2 is not None and len(kp1) >= 8 and len(kp2) >= 8:
+                    matches = matcher.knnMatch(des1, des2, k=2)
+                    good = []
+                    for pair in matches:
+                        if len(pair) < 2:
+                            continue
+                        m, n = pair
+                        if m.distance < 0.78 * n.distance:
+                            good.append(m)
+                    if len(good) >= 8:
+                        src_pts = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+                        dst_pts = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+                        H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+                        if mask is not None:
+                            inliers = int(mask.sum())
+                            inlier_ratio = inliers / max(1, len(good))
+                            if H is not None and inliers >= 8:
+                                try:
+                                    warped = cv2.warpPerspective(c_gray, H, (q_gray.shape[1], q_gray.shape[0]))
+                                    diff = float(np.mean(np.abs(q_gray.astype(np.float32) - warped.astype(np.float32)))) / 255.0
+                                    warp_score = max(0.0, 1.0 - diff)
+                                except cv2.error:
+                                    warp_score = 0.0
+                    elif good:
+                        inliers = len(good)
+                        inlier_ratio = min(1.0, len(good) / max(12.0, min(len(kp1), len(kp2))))
+
+                geom_score = min(1.0, inliers / 42.0) * 0.30 + inlier_ratio * 0.34 + warp_score * 0.36
+                structural_score = hist_score * 0.55 + edge_score * 0.45
+                score = max(
+                    structural_score * 0.38 + geom_score * 0.62,
+                    structural_score * 0.55 if inliers < 5 else 0.0,
+                )
+                return float(score), int(inliers), float(inlier_ratio), float(hist_score), float(edge_score)
+
+            try:
+                for item in payload:
+                    duration = max(0.2, item["narration_end"] - item["narration_start"])
+                    movie_duration = max(0.2, item["movie_end"] - item["movie_start"])
+                    if duration < 1.4:
+                        sample_positions = [0.50]
+                    elif duration < 2.8:
+                        sample_positions = [0.35, 0.65]
+                    else:
+                        sample_positions = [0.25, 0.50, 0.75]
+
+                    frame_scores: list[float] = []
+                    inlier_counts: list[int] = []
+                    inlier_ratios: list[float] = []
+                    hist_scores: list[float] = []
+                    edge_scores: list[float] = []
+
+                    for pos in sample_positions:
+                        q_time = item["narration_start"] + duration * pos
+                        c_time = item["movie_start"] + movie_duration * pos
+                        q_gray = _read_processed_frame(narr_cap, q_time, narration_masker)
+                        c_gray = _read_processed_frame(movie_cap, c_time, movie_masker)
+                        if q_gray is None or c_gray is None:
+                            continue
+                        score, inliers, inlier_ratio, hist_score, edge_score = _score_pair(q_gray, c_gray)
+                        frame_scores.append(score)
+                        inlier_counts.append(inliers)
+                        inlier_ratios.append(inlier_ratio)
+                        hist_scores.append(hist_score)
+                        edge_scores.append(edge_score)
+
+                    if not frame_scores:
+                        results[item["id"]] = {
+                            "verification_score": 0.0,
+                            "geometric_inliers": 0,
+                            "geometric_inlier_ratio": 0.0,
+                            "hist_score": 0.0,
+                            "edge_score": 0.0,
+                            "sample_count": 0,
+                        }
+                        continue
+
+                    results[item["id"]] = {
+                        "verification_score": float(np.mean(frame_scores)),
+                        "geometric_inliers": int(round(float(np.mean(inlier_counts)))) if inlier_counts else 0,
+                        "geometric_inlier_ratio": float(np.mean(inlier_ratios)) if inlier_ratios else 0.0,
+                        "hist_score": float(np.mean(hist_scores)) if hist_scores else 0.0,
+                        "edge_score": float(np.mean(edge_scores)) if edge_scores else 0.0,
+                        "sample_count": len(frame_scores),
+                    }
+            finally:
+                narr_cap.release()
+                movie_cap.release()
+
+            return results
+
+        return await asyncio.to_thread(_verify)
 
     def _candidate_starts(self, duration: float, time_hint: Optional[float], relaxed: bool, strict_window: bool) -> list[float]:
         if not self._times:
@@ -660,14 +1233,22 @@ class FrameMatcher:
         subset = self._times[left:right]
         return subset if subset else self._times
 
-    def _score_candidate(self, candidate_start: float, query_features: list[dict], search_radius: float) -> dict:
+    def _score_candidate(
+        self,
+        candidate_start: float,
+        query_features: list[dict],
+        search_radius: float,
+        time_scales: Optional[tuple[float, ...]] = None,
+    ) -> dict:
         best_score = 0.0
         best_matched = 0
         best_query_quality = 0.0
         best_candidate_quality = 0.0
         best_low_info_ratio = 1.0
         best_stability = 0.0
-        for time_scale in self._time_scales:
+        best_time_scale = 1.0
+        scales = time_scales if time_scales is not None else self._time_scales
+        for time_scale in scales:
             scores: list[float] = []
             weighted_query_quality = 0.0
             weighted_candidate_quality = 0.0
@@ -707,9 +1288,10 @@ class FrameMatcher:
             quality_penalty = max(0.0, low_info_ratio - 0.25) * 0.25
             # 截尾均值（取分数最高的70%）减少噪声帧影响
             sorted_scores = sorted(scores, reverse=True)
-            keep = max(1, int(len(sorted_scores) * 0.70))
+            keep = len(sorted_scores) if len(sorted_scores) <= 3 else max(2, int(len(sorted_scores) * 0.75))
             top_scores = sorted_scores[:keep]
             trimmed_mean = float(np.mean(top_scores))
+            floor_score = float(top_scores[-1]) if top_scores else trimmed_mean
             # 时序一致性：正确匹配时各帧得分应相近（变异系数小）
             # 错误匹配往往只有少数帧碰巧相似，方差大
             if len(top_scores) >= 2:
@@ -717,7 +1299,7 @@ class FrameMatcher:
                 consistency_bonus = max(0.0, 0.06 * (1.0 - min(1.0, score_cv * 2.0)))
             else:
                 consistency_bonus = 0.0
-            score = float(trimmed_mean * 0.87 + coverage * 0.09 + stability * 0.02 + consistency_bonus - quality_penalty)
+            score = float(trimmed_mean * 0.74 + floor_score * 0.13 + coverage * 0.09 + stability * 0.02 + consistency_bonus - quality_penalty)
             if score > best_score:
                 best_score = score
                 best_matched = matched
@@ -725,6 +1307,7 @@ class FrameMatcher:
                 best_candidate_quality = avg_candidate_quality
                 best_low_info_ratio = low_info_ratio
                 best_stability = stability
+                best_time_scale = float(time_scale)
         return {
             'score': max(0.0, min(1.0, best_score)),
             'match_count': best_matched,
@@ -732,6 +1315,42 @@ class FrameMatcher:
             'candidate_quality': max(0.0, min(1.0, best_candidate_quality)),
             'low_info_ratio': max(0.0, min(1.0, best_low_info_ratio if best_matched else 1.0)),
             'stability_score': max(0.0, min(1.0, best_stability)),
+            'time_scale': best_time_scale,
+        }
+
+    def score_precomputed_segment_at(
+        self,
+        precomputed_features: list[dict],
+        candidate_start: float,
+        *,
+        search_radius: Optional[float] = None,
+        time_scales: Optional[tuple[float, ...]] = None,
+    ) -> dict:
+        """Score a fixed movie timestamp using the already built frame index."""
+        if not self._index or not precomputed_features:
+            return {
+                "confidence": 0.0,
+                "match_count": 0,
+                "stability_score": 0.0,
+                "candidate_quality": 0.0,
+                "query_quality": 0.0,
+                "low_info_ratio": 1.0,
+                "time_scale": 1.0,
+            }
+        radius = (
+            float(search_radius)
+            if search_radius is not None
+            else max(0.75, min(1.25, float(self._sample_step_seconds) * 0.9))
+        )
+        scored = self._score_candidate(max(0.0, float(candidate_start)), precomputed_features, radius, time_scales)
+        return {
+            "confidence": float(scored.get("score", 0.0)),
+            "match_count": int(scored.get("match_count", 0)),
+            "stability_score": float(scored.get("stability_score", 0.0)),
+            "candidate_quality": float(scored.get("candidate_quality", 0.0)),
+            "query_quality": float(scored.get("query_quality", 0.0)),
+            "low_info_ratio": float(scored.get("low_info_ratio", 1.0)),
+            "time_scale": float(scored.get("time_scale", 1.0)),
         }
 
     def _feature_score(self, query: dict, candidate: dict) -> float:
@@ -963,16 +1582,7 @@ class FrameMatcher:
     def _mask_signature_for_role(self, source_role: str) -> tuple:
         regions = self._subtitle_regions_by_role.get(source_role, [])
         region_signature = tuple(
-            (
-                region.get('id'),
-                round(float(region.get('x', 0.0)), 4),
-                round(float(region.get('y', 0.0)), 4),
-                round(float(region.get('width', 0.0)), 4),
-                round(float(region.get('height', 0.0)), 4),
-                bool(region.get('enabled', True)),
-                None if region.get('start_time') is None else round(float(region.get('start_time')), 3),
-                None if region.get('end_time') is None else round(float(region.get('end_time')), 3),
-            )
+            self._region_signature_entry(source_role, region)
             for region in regions
         )
         return (

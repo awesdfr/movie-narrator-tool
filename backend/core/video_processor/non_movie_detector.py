@@ -41,9 +41,38 @@ class NonMovieDetector:
         return await asyncio.to_thread(_detect)
 
     async def detect_batch(self, video_path: str, segments: list[tuple[float, float]]) -> list[bool]:
-        tasks = [self.detect(video_path, start, end) for start, end in segments]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        return [False if isinstance(item, Exception) else bool(item) for item in results]
+        if not segments:
+            return []
+
+        capture_path = await ensure_analysis_video(video_path)
+
+        def _detect_batch() -> list[bool]:
+            capture = cv2.VideoCapture(str(capture_path))
+            if not capture.isOpened():
+                return [False] * len(segments)
+
+            results: list[bool] = []
+            try:
+                for start_time, end_time in segments:
+                    duration = max(0.0, float(end_time) - float(start_time))
+                    if duration <= 0:
+                        results.append(False)
+                        continue
+
+                    sample_count = 1 if len(segments) > 80 else 3
+                    scores: list[float] = []
+                    for idx in range(sample_count):
+                        sample_time = float(start_time) + duration * (idx + 0.5) / sample_count
+                        capture.set(cv2.CAP_PROP_POS_MSEC, sample_time * 1000)
+                        ok, frame = capture.read()
+                        if ok:
+                            scores.append(self._analyze_frame(frame))
+                    results.append(bool(scores) and float(np.mean(scores)) >= 0.5)
+            finally:
+                capture.release()
+            return results
+
+        return await asyncio.to_thread(_detect_batch)
 
     def _analyze_frame(self, frame: np.ndarray) -> float:
         gray = cv2.cvtColor(cv2.resize(frame, (256, 144)), cv2.COLOR_BGR2GRAY)

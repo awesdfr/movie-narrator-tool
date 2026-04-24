@@ -62,6 +62,17 @@ export const useProjectStore = defineStore('project', () => {
     return project
   }
 
+  async function updateProject(projectId, data) {
+    const updated = await projectApi.update(projectId, data)
+    if (currentProject.value?.id === projectId) {
+      currentProject.value = updated
+      segments.value = updated.segments || []
+      syncProgressFromProject(updated)
+    }
+    projects.value = projects.value.map(project => (project.id === projectId ? { ...project, ...updated } : project))
+    return updated
+  }
+
   async function deleteProject(id) {
     await projectApi.delete(id)
     projects.value = projects.value.filter(project => project.id !== id)
@@ -154,6 +165,11 @@ export const useProjectStore = defineStore('project', () => {
   async function rematchProject(projectId, data = { preserve_manual_matches: true }) {
     await connectProgress(projectId, 'matching', 'Rematching eligible segments...')
     await processApi.rematchProject(projectId, data)
+  }
+
+  async function rematchWeakProject(projectId, data = { preserve_manual_matches: true }) {
+    await connectProgress(projectId, 'matching', 'Rematching weak segments...')
+    await processApi.rematchWeakProject(projectId, data)
   }
 
   async function resegment(projectId, data = { preserve_manual_matches: true }) {
@@ -265,6 +281,7 @@ export const useProjectStore = defineStore('project', () => {
     fetchProjects,
     fetchProject,
     createProject,
+    updateProject,
     deleteProject,
     updateSubtitleRegions,
     startProcessing,
@@ -272,6 +289,7 @@ export const useProjectStore = defineStore('project', () => {
     updateSegment,
     batchUpdateSegments,
     rematchProject,
+    rematchWeakProject,
     resegment,
     rematchSegment,
     startPolishing,

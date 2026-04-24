@@ -41,6 +41,7 @@ export const processApi = {
   updateSegment: (projectId, segmentId, data) => api.put(`/process/${projectId}/segments/${segmentId}`, data),
   batchUpdateSegments: (projectId, data) => api.post(`/process/${projectId}/segments/batch`, data),
   rematchProject: (projectId, data = {}) => api.post(`/process/${projectId}/rematch`, data),
+  rematchWeakProject: (projectId, data = {}) => api.post(`/process/${projectId}/rematch-weak`, data),
   resegment: (projectId, data = {}) => api.post(`/process/${projectId}/resegment`, data),
   rematchSegment: (projectId, segmentId, data = {}) => api.post(`/process/${projectId}/segments/${segmentId}/rematch`, data),
   regenerateTTS: (projectId, segmentId) => api.post(`/process/${projectId}/segments/${segmentId}/regenerate-tts`),
@@ -70,9 +71,18 @@ export const previewApi = {
   getSourceInfo: (projectId, source) => api.get(`/preview/${projectId}/source-info?source=${source}`),
   getSegmentAudio: (projectId, segmentId, source = 'tts') => `/api/preview/${projectId}/segment/${segmentId}/audio?source=${source}`,
   getSegmentVideo: (projectId, segmentId, source = 'narration') => `/api/preview/${projectId}/segment/${segmentId}/video?source=${source}`,
+  getCreativePlan: projectId => api.get(`/preview/${projectId}/creative-plan`),
   getMatchReportUrl: projectId => `/api/preview/${projectId}/export/report`,
   getDaVinciXmlUrl: projectId => `/api/preview/${projectId}/export/davinci`,
-  exportJianying: projectId => api.post(`/preview/${projectId}/export/jianying`),
+  evaluateBenchmark: (projectId, manifestPath = null) =>
+    api.post(`/preview/${projectId}/benchmark/evaluate`, { manifest_path: manifestPath }),
+  getBenchmarkReportUrl: projectId => `/api/preview/${projectId}/benchmark/report`,
+  runVisualAudit: (projectId, data = {}) => api.post(`/preview/${projectId}/audit/visual`, data),
+  getVisualAuditReportUrl: projectId => `/api/preview/${projectId}/audit/report`,
+  getCommercialReadiness: projectId => api.get(`/preview/${projectId}/commercial-readiness`),
+  exportJianying: (projectId, mode = 'creative_draft') =>
+    api.post(`/preview/${projectId}/export/jianying`, null, { params: { mode } }),
+  exportMaterialBasket: projectId => api.post(`/preview/${projectId}/export/material-basket`),
   exportSubtitle: (projectId, format = 'srt') => api.post(`/preview/${projectId}/export/subtitle?format=${format}`)
 }
 

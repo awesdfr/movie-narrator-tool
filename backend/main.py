@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -10,6 +11,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
+
+os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "16")
+os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
 
 from api.routes import files, preview, process_v2 as process, project, settings as settings_api
 from api.websocket import router as ws_router
@@ -56,6 +60,23 @@ async def lifespan(app: FastAPI):
     logger.info(f"Projects directory: {settings.projects_dir}")
     logger.info(f"Videos directory: {settings.videos_dir}")
     logger.info(f"Static directory: {STATIC_DIR}")
+    recovered = 0
+    for file_path in settings.projects_dir.glob("*.json"):
+        if file_path.name == "settings.json":
+            continue
+        if "." in file_path.stem:
+            continue
+        try:
+            stale_project = project.load_project(file_path.stem)
+            if stale_project and project.recover_stale_project(
+                stale_project,
+                reason="上次任务因服务重启中断，当前状态已重置，请重新点击开始处理或重匹配。",
+            ):
+                recovered += 1
+        except Exception as exc:
+            logger.warning(f"Failed to recover stale project state for {file_path}: {exc}")
+    if recovered:
+        logger.info(f"Recovered {recovered} stale in-progress project(s) on startup")
     yield
     logger.info("Application shutdown")
 
@@ -135,7 +156,7 @@ if __name__ == "__main__":
         time.sleep(2)
         webbrowser.open(f"http://{settings.host}:{settings.port}")
 
-    if not settings.debug:
+    if settings.debug:
         threading.Thread(target=open_browser, daemon=True).start()
 
     logger.info(f"Serving on http://{settings.host}:{settings.port}")

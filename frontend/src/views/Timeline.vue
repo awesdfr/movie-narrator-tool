@@ -63,7 +63,7 @@
                 v-for="segment in selectedSegments"
                 :key="segment.id"
                 class="tl-seg movie"
-                :class="{ active: selectedSegmentId === segment.id }"
+                :class="[selectedSegmentId === segment.id ? 'active' : '', segment.match_type || 'exact']"
                 :style="getSegmentStyle(segment, 'movie')"
                 @click="selectSegment(segment)"
                 :title="`#${segment.index + 1} · ${formatTime(segment.movie_start)}–${formatTime(segment.movie_end)}`"
@@ -128,6 +128,14 @@
           <div class="di-label">置信度</div>
           <div class="di-value accent">{{ ((selectedSegment.match_confidence || 0) * 100).toFixed(0) }}%</div>
         </div>
+        <div class="detail-item">
+          <div class="di-label">Match Type</div>
+          <div class="di-value">{{ selectedSegment.match_type || 'exact' }}</div>
+        </div>
+        <div class="detail-item detail-wide">
+          <div class="di-label">Evidence</div>
+          <div class="di-value">{{ selectedSegment.evidence_summary || selectedSegment.match_reason || '--' }}</div>
+        </div>
       </div>
     </div>
   </div>
@@ -146,7 +154,7 @@ const zoom = ref(1)
 const currentTime = ref(0)
 const selectedSegmentId = ref(null)
 
-const selectedSegments = computed(() => projectStore.selectedSegments)
+const selectedSegments = computed(() => projectStore.selectedSegments.filter(segment => segment.segment_type !== 'non_movie'))
 
 const selectedSegment = computed(() => {
   if (!selectedSegmentId.value) return null
@@ -379,6 +387,9 @@ function selectSegment(segment) {
     background: rgba(91,108,248,.35);
     border: 1px solid rgba(91,108,248,.6);
     &.active { box-shadow: 0 0 0 2px var(--accent); }
+    &.exact { background: rgba(34,197,94,.30); border-color: rgba(34,197,94,.58); }
+    &.inferred { background: rgba(245,158,11,.28); border-color: rgba(245,158,11,.58); }
+    &.fallback { background: rgba(239,68,68,.24); border-color: rgba(239,68,68,.56); }
   }
 
   &.audio {
@@ -452,6 +463,9 @@ function selectSegment(segment) {
   border-radius: 7px;
   padding: 10px 12px;
 }
+.detail-item.detail-wide {
+  grid-column: span 2;
+}
 
 .di-label {
   font-size: 11px;
@@ -469,5 +483,6 @@ function selectSegment(segment) {
 
 @media (max-width: 900px) {
   .detail-grid { grid-template-columns: repeat(2, 1fr); }
+  .detail-item.detail-wide { grid-column: span 2; }
 }
 </style>

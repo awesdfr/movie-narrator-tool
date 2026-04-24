@@ -66,7 +66,7 @@ def ensure_analysis_video_sync(video_path: str | Path) -> str:
     proxy_dir = settings.temp_dir / "analysis_video"
     proxy_dir.mkdir(parents=True, exist_ok=True)
     proxy_hash = hashlib.md5(cache_key.encode("utf-8")).hexdigest()[:16]
-    proxy_path = proxy_dir / f"{proxy_hash}.mkv"
+    proxy_path = proxy_dir / f"{proxy_hash}.mp4"
     if proxy_path.exists() and proxy_path.stat().st_size > 0:
         _CACHE[cache_key] = str(proxy_path)
         return str(proxy_path)
@@ -84,6 +84,8 @@ def ensure_analysis_video_sync(video_path: str | Path) -> str:
         "-dn",
         "-c:v",
         "copy",
+        "-movflags",
+        "+faststart",
         str(proxy_path),
     ]
     transcode_cmd = [
@@ -104,6 +106,8 @@ def ensure_analysis_video_sync(video_path: str | Path) -> str:
         "18",
         "-pix_fmt",
         "yuv420p",
+        "-movflags",
+        "+faststart",
         str(proxy_path),
     ]
 

@@ -111,28 +111,45 @@ class AudioMatcher:
 
             features = []
             times = []
-
-            total_windows = (len(y) - window_samples) // step_samples + 1
-            processed = 0
-
-            for start in range(0, len(y) - window_samples, step_samples):
-                window = y[start:start + window_samples]
-
-                # 计算 MFCC
+            
+            # 确保有足够的样本用于处理
+            if len(y) < window_samples:
+                logger.warning(f"音频太短 ({len(y)} < {window_samples} samples), 使用整个音频作为单个特征")
+                window = y[:len(y)]
                 mfcc = librosa.feature.mfcc(
                     y=window,
                     sr=sr,
                     n_mfcc=self.n_mfcc,
                     hop_length=self.hop_length
                 )
-
-                # 聚合为单一向量：均值 + 标准差
                 feature = np.concatenate([
                     mfcc.mean(axis=1),
                     mfcc.std(axis=1)
                 ])
                 features.append(feature)
-                times.append(start / sr)
+                times.append(0)
+            else:
+                total_windows = (len(y) - window_samples) // step_samples + 1
+                processed = 0
+
+                for start in range(0, len(y) - window_samples, step_samples):
+                    window = y[start:start + window_samples]
+
+                    # 计算 MFCC
+                    mfcc = librosa.feature.mfcc(
+                        y=window,
+                        sr=sr,
+                        n_mfcc=self.n_mfcc,
+                        hop_length=self.hop_length
+                    )
+
+                    # 聚合为单一向量：均值 + 标准差
+                    feature = np.concatenate([
+                        mfcc.mean(axis=1),
+                        mfcc.std(axis=1)
+                    ])
+                    features.append(feature)
+                    times.append(start / sr)
 
                 processed += 1
                 if processed % 500 == 0:
@@ -147,16 +164,16 @@ class AudioMatcher:
             features_array = np.array(features).astype('float32')
 
             # L2 归一化，使内积等于余弦相似度
-            faiss.normalize_L2(features_array) if FAISS_AVAILABLE else None
-
             if FAISS_AVAILABLE:
+                faiss.normalize_L2(features_array)
                 # 使用内积索引（归一化后等价于余弦相似度）
                 self._faiss_index = faiss.IndexFlatIP(features_array.shape[1])
                 self._faiss_index.add(features_array)
                 logger.info(f"FAISS 索引构建完成: {len(features)} 个特征向量")
             else:
                 # 使用 numpy 数组
-                self._faiss_index = features_array
+                features_array_norm = features_array / (np.linalg.norm(features_array, axis=1, keepdims=True) + 1e-10)
+                self._faiss_index = features_array_norm
                 logger.info(f"Numpy 索引构建完成: {len(features)} 个特征向量")
 
         # 保存缓存

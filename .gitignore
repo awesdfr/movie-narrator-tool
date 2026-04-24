@@ -17,6 +17,7 @@ dist/
 # IDE
 .idea/
 .vscode/
+.workbuddy/
 *.swp
 *.swo
 
