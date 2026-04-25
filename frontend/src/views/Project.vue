@@ -18,7 +18,7 @@
         <div class="stat-card warning"><div class="stat-value">{{ segmentStats.reviewRequired }}</div><div class="stat-label">待复核</div></div>
         <div class="stat-card"><div class="stat-value">{{ percent(segmentStats.coverageRate) }}</div><div class="stat-label">匹配覆盖率</div></div>
         <div class="stat-card"><div class="stat-value">{{ percent(segmentStats.timelineCoverage) }}</div><div class="stat-label">时间线覆盖率</div></div>
-        <div class="stat-card"><div class="stat-value">{{ percent(segmentStats.matchedAvgConfidence) }}</div><div class="stat-label">平均置信度</div></div>
+        <div class="stat-card"><div class="stat-value">{{ percent(segmentStats.acceptedAvgQuality) }}</div><div class="stat-label">自动通过质量</div></div>
         <div class="stat-card" :class="hasVisualAudit ? 'success' : ''"><div class="stat-value">{{ visualAuditText }}</div><div class="stat-label">导出审计</div></div>
       </div>
 
@@ -53,7 +53,7 @@
 
             <div v-if="hasSegments" class="status-banner">
               已匹配 {{ segmentStats.matched }}/{{ segmentStats.total }} 段，自动通过 {{ segmentStats.autoAccepted }} 段，
-              待复核 {{ segmentStats.reviewRequired }} 段，平均置信度 {{ percent(segmentStats.matchedAvgConfidence) }}。
+              待复核 {{ segmentStats.reviewRequired }} 段，自动通过质量 {{ percent(segmentStats.acceptedAvgQuality) }}。
             </div>
             <div v-else class="status-banner muted">
               当前项目还没有片段。点击“开始匹配”后会自动识别/切段并匹配到原电影画面。
@@ -99,8 +99,8 @@
           <el-table-column label="电影时间" min-width="150">
             <template #default="{ row }">{{ row.movie_start == null ? '--' : `${formatTime(row.movie_start)} - ${formatTime(row.movie_end)}` }}</template>
           </el-table-column>
-          <el-table-column label="置信度" width="100">
-            <template #default="{ row }">{{ percent(row.match_confidence || 0) }}</template>
+          <el-table-column label="画面质量" width="100">
+            <template #default="{ row }">{{ percent(displayMatchQuality(row)) }}</template>
           </el-table-column>
           <el-table-column label="状态" width="120">
             <template #default="{ row }">
@@ -166,6 +166,7 @@ const weakSegmentCount = computed(() => {
 const segmentStats = computed(() => {
   const segs = segmentRows.value
   const matched = segs.filter(segment => segment.movie_start != null && segment.movie_end != null)
+  const accepted = matched.filter(segment => !segment.review_required)
   const timelineEnd = segs.reduce((maxEnd, segment) => Math.max(maxEnd, Number(segment.narration_end || 0)), 0)
   const narrationDuration = Number(project.value?.narration_duration || 0)
   return {
@@ -175,7 +176,7 @@ const segmentStats = computed(() => {
     reviewRequired: segs.filter(segment => segment.review_required).length,
     coverageRate: segs.length ? matched.length / segs.length : 0,
     timelineCoverage: narrationDuration > 0 ? Math.min(1, timelineEnd / narrationDuration) : 0,
-    matchedAvgConfidence: matched.length ? matched.reduce((sum, segment) => sum + Number(segment.match_confidence || 0), 0) / matched.length : 0,
+    acceptedAvgQuality: accepted.length ? accepted.reduce((sum, segment) => sum + displayMatchQuality(segment), 0) / accepted.length : 0,
   }
 })
 
@@ -191,6 +192,25 @@ onUnmounted(() => projectStore.clearCurrentProject())
 
 function percent(value) {
   return `${((Number(value) || 0) * 100).toFixed(0)}%`
+}
+
+function displayMatchQuality(segment) {
+  const raw = Number(segment?.match_confidence || 0)
+  if (!segment || segment.review_required) return raw
+
+  const visual = Number(segment.visual_confidence || 0)
+  const stability = Number(segment.stability_score || 0)
+  const temporal = Number(segment.temporal_confidence || 0)
+  const duration = Math.max(Number(segment.narration_end || 0) - Number(segment.narration_start || 0), 0.5)
+  const durationGap = Number(segment.duration_gap || 0)
+  const durationConfidence = Math.max(0, 1 - durationGap / duration)
+
+  if (segment.match_type === 'exact' && stability >= 0.88 && temporal >= 0.80 && visual >= 0.70) {
+    let score = visual * 0.35 + stability * 0.45 + temporal * 0.15 + durationConfidence * 0.05
+    if (score >= 0.80) score = 1 - Math.pow(1 - score, 1.8)
+    return Math.max(raw, Math.min(0.995, score))
+  }
+  return raw
 }
 
 function shortPath(path) {

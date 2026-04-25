@@ -478,6 +478,31 @@ def _combine_candidate_confidence(
     return min(1.0, max(0.0, score))
 
 
+def _calibrated_match_confidence(segment: Segment, candidate: MatchCandidate, review_required: bool) -> float:
+    """Final user-facing confidence, keeping raw visual_confidence for diagnostics."""
+
+    raw = float(candidate.confidence or 0.0)
+    if review_required:
+        return raw
+
+    visual = float(candidate.visual_confidence or 0.0)
+    stability = float(candidate.stability_score or 0.0)
+    temporal = float(candidate.temporal_confidence or 0.0)
+    duration = max(_segment_duration(segment), 0.5)
+    duration_confidence = max(0.0, 1.0 - float(candidate.duration_gap or 0.0) / duration)
+
+    # Stable visual chunks are often visually correct but get conservative raw
+    # frame scores after subtitles, grading, masks, or speed edits. Use the
+    # sequence evidence for the final displayed quality, not just one raw score.
+    if candidate.source == "visual_chunk" and stability >= 0.88 and temporal >= 0.80 and visual >= 0.70:
+        score = visual * 0.35 + stability * 0.45 + temporal * 0.15 + duration_confidence * 0.05
+        if score >= 0.80:
+            score = 1.0 - (1.0 - score) ** 1.8
+        return max(raw, min(0.995, score))
+
+    return raw
+
+
 def _temporal_confidence_for_result(segment: Segment, result: dict, expected_movie_time: Optional[float]) -> float:
     if expected_movie_time is None:
         return 1.0
@@ -1817,7 +1842,7 @@ def _apply_selected_candidate(segment: Segment, candidate: MatchCandidate, statu
 
     segment.movie_start = candidate.start
     segment.movie_end = candidate.end
-    segment.match_confidence = candidate.confidence
+    segment.match_confidence = _calibrated_match_confidence(segment, candidate, review_required)
     segment.visual_confidence = candidate.visual_confidence
     segment.audio_confidence = candidate.audio_confidence
     segment.temporal_confidence = candidate.temporal_confidence
